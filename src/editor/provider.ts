@@ -123,6 +123,7 @@ export class FpgaEditorProvider implements vscode.CustomTextEditorProvider {
     <div id="stage">
       <svg id="grid" xmlns="http://www.w3.org/2000/svg"></svg>
       <svg id="canvas" xmlns="http://www.w3.org/2000/svg" tabindex="0"></svg>
+      <div id="diag-banner"></div>
       <div id="overlay"></div>
     </div>
     <div id="inspector"></div>

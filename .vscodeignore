@@ -5,6 +5,11 @@ tsconfig.json
 esbuild.mjs
 package-lock.json
 samples/**
+test/**
+out/test/**
+.github/**
 **/*.ts
 **/*.map
-docs/img/*.svg
+*.vsix
+# 示例截图只给 GitHub 看，不必进 vsix（docs/DSL.md 要留，命令面板会打开它）
+docs/img/**

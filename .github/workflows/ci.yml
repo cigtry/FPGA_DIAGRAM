@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+
+      - name: 类型检查
+        run: npx tsc --noEmit
+
+      - name: 回归测试（解析 / 序列化 / 行号 / 颜色）
+        run: npm test
+
+      - name: 打包构建
+        run: npm run build

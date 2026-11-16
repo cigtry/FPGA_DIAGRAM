@@ -88,6 +88,9 @@ const statusEl = document.getElementById('status') as HTMLDivElement;
 /** 页签条：旧宿主页面里可能没有，paintTabs 会跳过 */
 const tabsEl = document.getElementById('tabs') as HTMLDivElement | null;
 
+/** 与 parse.ts 的色值白名单保持一致：颜色直接进 SVG 属性，引号和尖括号一律不放行 */
+const COLOR_OK = /^(#[0-9a-f]{3,8}|[a-z]{3,20}|rgba?\([\d\s.,%/]+\)|hsla?\([\d\s.,%deg/]+\))$/i;
+
 // ------------------------------------------------------------------ utils
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string): HTMLElementTagNameMap[K] {
@@ -921,6 +924,20 @@ function paintSignalInspector(picked: { row: TimingRow; panel: TimingPanel; pane
     paintTimingPalette();
     save();
   })));
+
+  if (row.type !== 'group') {
+    inspectorEl.appendChild(field('颜色', textInput(row.color ?? '', (v) => {
+      const s = v.trim();
+      if (s && !COLOR_OK.test(s)) {
+        flash('颜色要写成 #e11 / #ee1111 / red 这种');
+        return;
+      }
+      row.color = s || undefined;
+      paint();
+      paintTimingPalette();
+      save();
+    }, '#e11（留空用默认色）')));
+  }
 
   inspectorEl.appendChild(field('类型', selectInput(
     [['clock', '时钟'], ['logic', '单比特'], ['bus', '总线'], ['group', '分组标题']],
@@ -2256,15 +2273,55 @@ function fitView(): void {
 
 // ------------------------------------------------------------------ host sync
 
+function hasContent(scenes: Diagram[]): boolean {
+  return scenes.some((s) => s.nodes.length > 0 || s.panels.some((p) => p.rows.length > 0));
+}
+
+/**
+ * 语法坏掉时把错误摊在画布上方。
+ * 旧行为是直接换成空图 —— 用户眼前一白，以为图被自己删了。
+ */
+function showDiagBanner(errs: Diagnostic[], keptLast: boolean): void {
+  const box = document.getElementById('diag-banner');
+  if (!box) return;
+  if (!errs.length) {
+    box.style.display = 'none';
+    box.innerHTML = '';
+    return;
+  }
+  const rows = errs
+    .slice(0, 5)
+    .map(
+      (d) =>
+        `<div class="diag-row">${d.line ? `<b>第 ${d.line} 行</b>　` : ''}${esc(d.message)}</div>`,
+    )
+    .join('');
+  const more = errs.length > 5 ? `<div class="diag-row diag-more">还有 ${errs.length - 5} 处…</div>` : '';
+  box.innerHTML =
+    `<div class="diag-h">✖ ${errs.length} 处解析错误${keptLast ? ' · 画布保留上一版' : ''}</div>${rows}${more}`;
+  box.style.display = 'block';
+}
+
 function applyFileText(text: string, external: boolean): void {
   S.fileText = text;
   const { file, diagnostics } = parseFile(text, S.kind);
+  const errs = diagnostics.filter((d) => d.severity === 'error');
+  S.diags = diagnostics;
+
+  // 解析失败且一个字都画不出来时，保留上一版画面，避免"白板"让人以为图没了
+  const blank = !hasContent(file.scenes);
+  if (errs.length && blank && hasContent(S.scenes)) {
+    showDiagBanner(errs, true);
+    paintStatus();
+    return;
+  }
+
   S.scenes = file.scenes;
   S.active = file.active;
   S.doc = S.scenes[S.active];
-  S.diags = diagnostics;
   S.kind = S.doc.kind;
   S.activePanel = 0;
+  showDiagBanner(errs, false);
   if (external) {
     S.sel = { nodes: [], edges: [], panel: S.sel.panel, row: null };
     S.history.length = 0;

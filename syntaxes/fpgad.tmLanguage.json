@@ -1,0 +1,53 @@
+{
+  "name": "FPGA Diagram",
+  "scopeName": "source.fpgad",
+  "patterns": [
+    { "include": "#strings" },
+    { "include": "#comments" },
+    { "include": "#keys" },
+    { "include": "#kind-values" },
+    { "include": "#bitwidth" },
+    { "include": "#edge-arrow" },
+    { "include": "#numbers" },
+    { "include": "#literals" },
+    { "include": "#item-marker" }
+  ],
+  "repository": {
+    "strings": {
+      "match": "\"([^\"\\\\]|\\\\.)*\"|'([^'\\\\]|\\\\.)*'",
+      "name": "string.quoted.fpgad"
+    },
+    "comments": {
+      "match": "#.*$",
+      "name": "comment.line.number-sign.fpgad"
+    },
+    "keys": {
+      "match": "\\b(kind|scenes|active|title|options|direction|layout|nodes|edges|states|transitions|panels|signals|rows|ports|children|id|name|label|sub|note|type|shape|size|pos|x|y|from|to|from_port|to_port|side|style|route|arrow|action|dash|titlePos|freq|period|duty|phase|values|wave|tick|steps|color|protocol|bits|clock_domain|encoding)\\b(?=\\s*:)",
+      "name": "support.type.property-name.fpgad"
+    },
+    "kind-values": {
+      "match": "\\b(block|fsm|timing|flow|module|io|group|frame|clock|logic|bus|wire|ctrl|orth|straight|curve|both|none|end|moore|mealy|onehot|gray|binary|dashed|br|LR|TB)\\b",
+      "name": "constant.language.fpgad"
+    },
+    "bitwidth": {
+      "match": "\\[[0-9]+(:[0-9]+)?\\]",
+      "name": "constant.numeric.bitwidth.fpgad"
+    },
+    "edge-arrow": {
+      "match": "<->|-->|->|--|→",
+      "name": "keyword.operator.arrow.fpgad"
+    },
+    "numbers": {
+      "match": "\\b-?[0-9]+(\\.[0-9]+)?\\b",
+      "name": "constant.numeric.fpgad"
+    },
+    "literals": {
+      "match": "\\b(true|false|null)\\b",
+      "name": "constant.language.fpgad"
+    },
+    "item-marker": {
+      "match": "^\\s*(-)(?=\\s)",
+      "name": "punctuation.definition.entry.fpgad"
+    }
+  }
+}

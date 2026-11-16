@@ -7,8 +7,13 @@ import { palette, ThemeName } from './core/theme';
 import { serializeFile } from './core/serialize';
 import { sample } from './core/examples';
 import { timingSummary } from './core/model';
+// 版本号只有 package.json 一个出处，避免服务端自报版本和插件版本各说各话
+import pkg from '../package.json';
 
 type Json = Record<string, any>;
+
+const PKG_VERSION = (pkg as { version: string }).version;
+const SUPPORTED_PROTOCOLS = ['2024-11-05', '2025-03-26'];
 
 const TOOLS = [
   {
@@ -139,9 +144,11 @@ function handle(msg: Json) {
     case 'initialize':
       if (isNotification) return;
       return reply(id, {
-        protocolVersion: params?.protocolVersion ?? '2024-11-05',
+        protocolVersion: SUPPORTED_PROTOCOLS.includes(String(params?.protocolVersion))
+          ? params.protocolVersion
+          : SUPPORTED_PROTOCOLS[SUPPORTED_PROTOCOLS.length - 1],
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'fpga-diagram', version: '0.1.0' },
+        serverInfo: { name: 'fpga-diagram', version: PKG_VERSION },
         instructions:
           'FPGA 图表工具。用 fpga_diagram_example 取模板，用 fpga_diagram_validate 自检，用 fpga_diagram_render 产出 SVG 或 .fpgad。DSL 为 YAML 子集，只需描述节点与连线，坐标自动布局。',
       });

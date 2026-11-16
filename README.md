@@ -54,11 +54,13 @@ edges:
 ```bash
 npm install
 npm run build
-npm run package      # 产出 fpga-diagram-0.1.0.vsix
-code --install-extension fpga-diagram-0.1.0.vsix
+npm test             # 解析 / 序列化 / 行号 / 颜色 回归，26 个用例
+npm run package      # 产出 fpga-diagram-0.2.1.vsix
+code --install-extension fpga-diagram-0.2.1.vsix
 ```
 
 开发调试：用 VS Code 打开本目录，按 `F5` 起扩展宿主。
+测试用 esbuild 打包 + `node --test`，不引入 jest 之类的额外运行时；CI 跑 tsc + test + build。
 
 ## 用法
 

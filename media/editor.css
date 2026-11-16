@@ -168,6 +168,49 @@ button.tb-btn:disabled:hover {
   outline: none;
 }
 
+/* 解析错误横幅：浮在画布上方，不挡交互 */
+#diag-banner {
+  display: none;
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  top: 10px;
+  z-index: 30;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--vscode-inputValidation-errorBorder, #be1100);
+  background: var(--vscode-inputValidation-errorBackground, rgba(190, 17, 0, 0.14));
+  color: var(--vscode-foreground);
+  font-size: 12px;
+  line-height: 1.55;
+  max-height: 40%;
+  overflow: auto;
+  pointer-events: auto;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+}
+
+#diag-banner .diag-h {
+  font-weight: 600;
+  color: var(--vscode-errorForeground, #f14c4c);
+  margin-bottom: 2px;
+}
+
+#diag-banner .diag-row {
+  font-family: var(--mono, monospace);
+  font-size: 11.5px;
+  opacity: 0.92;
+  white-space: pre-wrap;
+}
+
+#diag-banner .diag-row b {
+  color: var(--vscode-errorForeground, #f14c4c);
+  font-weight: 600;
+}
+
+#diag-banner .diag-more {
+  opacity: 0.65;
+}
+
 .fd-node {
   cursor: move;
 }

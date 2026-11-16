@@ -22,7 +22,15 @@
     ["'", "'"]
   ],
   "indentationRules": {
-    "increaseIndentPattern": "^\\s*(nodes|states|edges|transitions|signals|rows|options)\\s*:\\s*(#.*)?$",
+    "increaseIndentPattern": "^\\s*(nodes|states|edges|transitions|signals|rows|panels|scenes|options|ports|children)\\s*:\\s*(#.*)?$",
     "decreaseIndentPattern": "^\\s*\\S"
-  }
+  },
+  "folding": {
+    "markers": {
+      "start": "^\\s*#\\s*region",
+      "end": "^\\s*#\\s*endregion"
+    }
+  },
+  "wordPattern": "([A-Za-z0-9_\\u4e00-\\u9fa5]+)|([^\\s]+)",
+  "onEnterRules": []
 }

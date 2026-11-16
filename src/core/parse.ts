@@ -75,11 +75,87 @@ const ROUTE_WORDS: Record<string, EdgeRoute> = {
   curved: 'curve',
 };
 
-function lineIndex(text: string) {
+/**
+ * 行号索引。旧实现是 `lines.findIndex(l => l.includes(needle))`：
+ * 同名节点、重复 id、多条连线都会命中第一处，"带行号让 AI 自修正"反而变成误导。
+ *
+ * 这里按缩进做一次轻量行扫描（js-yaml 不暴露 AST，引 `yaml` 包只为行号不值当）：
+ * - `id/name/label` 的值 → 行号，按文档顺序消耗，重复 id 的第二次拿到第二行；
+ * - `nodes/edges/...` 下的 `- ` 项 → 行号，按顺序消耗，报错能指到具体那条连线。
+ */
+export interface LineIndex {
+  /** 按标量值取行号（消耗式：第二次取同名值给第二处） */
+  at(value: string): number | undefined;
+  /** 某个 key 第一次出现的行号 */
+  key(key: string): number | undefined;
+  /** 某个序列（nodes/edges…）的下一项行号，按文档顺序消耗 */
+  nextSeq(key: string): number | undefined;
+}
+
+export function buildLineIndex(text: string): LineIndex {
   const lines = text.split(/\r?\n/);
-  return (needle: string): number | undefined => {
-    const i = lines.findIndex((l) => l.includes(needle));
-    return i >= 0 ? i + 1 : undefined;
+  const byValue = new Map<string, number[]>();
+  const byKey = new Map<string, number[]>();
+  const seq = new Map<string, number[]>();
+  const usedValue = new Map<string, number>();
+  const usedSeq = new Map<string, number>();
+  const stack: Array<{ indent: number; key: string }> = [];
+
+  const push = (m: Map<string, number[]>, k: string, v: number) => {
+    if (!k) return;
+    const arr = m.get(k);
+    if (arr) arr.push(v);
+    else m.set(k, [v]);
+  };
+  const unquote = (s: string) => s.trim().replace(/^["']|["']$/g, '');
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].replace(/#.*$/, '');
+    if (!line.trim()) continue;
+    const ind = (line.match(/^\s*/) as RegExpMatchArray)[0].length;
+
+    if (/^\s*-(\s|$)/.test(line)) {
+      const parent = stack.length ? stack[stack.length - 1].key : '';
+      push(seq, parent, i + 1);
+      const inline = line.match(/(?:^|[{\s,])(id|name|label)\s*:\s*([^,}]+)/);
+      if (inline) push(byValue, unquote(inline[2]), i + 1);
+      continue;
+    }
+
+    const kv = line.match(/^\s*([A-Za-z_][\w-]*)\s*:\s*(.*)$/);
+    if (!kv) continue;
+    while (stack.length && stack[stack.length - 1].indent >= ind) stack.pop();
+    const key = kv[1];
+    const val = kv[2].trim();
+    push(byKey, key, i + 1);
+    if (val) {
+      if (['id', 'name', 'label'].includes(key) && !/^[[{]/.test(val)) push(byValue, unquote(val), i + 1);
+    } else {
+      stack.push({ indent: ind, key });
+    }
+  }
+
+  return {
+    at(value: string) {
+      const arr = byValue.get(value);
+      if (arr?.length) {
+        const k = usedValue.get(value) ?? 0;
+        usedValue.set(value, k + 1);
+        return arr[Math.min(k, arr.length - 1)];
+      }
+      const i = lines.findIndex((l) => l.includes(value));
+      return i >= 0 ? i + 1 : undefined;
+    },
+    key(k: string) {
+      return byKey.get(k)?.[0];
+    },
+    nextSeq(k: string) {
+      const arr = seq.get(k);
+      if (!arr?.length) return undefined;
+      const i = usedSeq.get(k) ?? 0;
+      usedSeq.set(k, i + 1);
+      return arr[i] ?? arr[arr.length - 1];
+    },
   };
 }
 
@@ -153,41 +229,89 @@ function normPorts(raw: unknown, diags: Diagnostic[]): Port[] {
   return out;
 }
 
+/**
+ * 拆 `节点.端口`。端口名允许带位宽/下标，如 `awaddr[19:0]`、`din[7]`：
+ * FPGA 里端口按位切片连线是常态，正则必须放行 `[ ] : ( )`。
+ */
 function splitEndpoint(s: string): { node: string; port?: string } {
   const t = s.trim();
-  const m = t.match(/^(.+?)\.([A-Za-z0-9_\u4e00-\u9fa5]+)$/);
+  const m = t.match(/^(.+?)\.([A-Za-z0-9_\u4e00-\u9fa5[\]():]+)$/);
   if (m) return { node: m[1].trim(), port: m[2].trim() };
   return { node: t };
 }
 
+/** 在括号外找标签分隔符 `:`，避免把 `awaddr[19:0]` 里的冒号当成标签起点 */
+function splitLabel(rest: string): { head: string; label?: string } {
+  let depth = 0;
+  for (let i = 0; i < rest.length; i++) {
+    const ch = rest[i];
+    if (ch === '[' || ch === '(') depth++;
+    else if (ch === ']' || ch === ')') depth = Math.max(0, depth - 1);
+    else if ((ch === ':' || ch === '：') && depth === 0) {
+      return { head: rest.slice(0, i).trim(), label: rest.slice(i + 1).trim() };
+    }
+  }
+  return { head: rest.trim() };
+}
+
+const STYLE_KV = /^(style|route|样式|路由)[:=](.+)$/i;
+
+/**
+ * 拆标签里的样式/路由词。
+ * - 显式写法 `style:bus` / `route:curve` 永远优先；
+ * - 裸词（bus/clk/ctrl…）只在"标签整串就这一个词"时当样式，
+ *   否则 `A -> B : clk 32bit` 里的 clk 会被静默吃掉——那是信号名，不是样式。
+ */
+function parseEdgeLabel(raw: string): { label?: string; style?: EdgeStyle; route?: EdgeRoute } {
+  const words = raw.split(/\s+/).filter(Boolean);
+  const keep: string[] = [];
+  let style: EdgeStyle | undefined;
+  let route: EdgeRoute | undefined;
+
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    const kv = w.match(STYLE_KV);
+    if (!kv) {
+      keep.push(w);
+      continue;
+    }
+    const key = kv[1].toLowerCase();
+    let val = kv[2].trim();
+    if (!val && i + 1 < words.length) val = words[++i];
+    const low = val.toLowerCase();
+    if (key === 'route' || key === '路由') route = ROUTE_WORDS[low] ?? ROUTE_WORDS[val] ?? route;
+    else style = STYLE_WORDS[low] ?? STYLE_WORDS[val] ?? style;
+  }
+
+  if (!style && !route && keep.length === 1) {
+    const k = keep[0];
+    const s = STYLE_WORDS[k.toLowerCase()] ?? STYLE_WORDS[k];
+    const r = ROUTE_WORDS[k.toLowerCase()] ?? ROUTE_WORDS[k];
+    if (s) return { style: s };
+    if (r) return { route: r };
+  }
+  const text = keep.join(' ').trim();
+  if (!text || text === '""' || text === "''") return { style, route };
+  return { label: text, style, route };
+}
+
 function parseEdgeString(raw: string): Partial<DiagramEdge> | null {
-  const m = raw.match(/^(.+?)\s*(<->|->|--|→|-->)\s*(.+)$/);
+  // 长箭头放前面，否则 `-->` 会被 `--` 抢先匹配成无箭头
+  const m = raw.match(/^(.+?)\s*(<->|-->|->|--|→)\s*(.+)$/);
   if (!m) return null;
   const arrow: DiagramEdge['arrow'] = m[2] === '<->' ? 'both' : m[2] === '--' ? 'none' : 'end';
   const from = splitEndpoint(m[1]);
-  let rest = m[3].trim();
-  let label: string | undefined;
-  const ci = rest.search(/[:：]/);
-  if (ci >= 0) {
-    label = rest.slice(ci + 1).trim();
-    rest = rest.slice(0, ci).trim();
-  }
-  const to = splitEndpoint(rest);
-  let style: EdgeStyle = 'wire';
-  let route: EdgeRoute = 'orth';
-  if (label) {
-    const tokens = label.split(/\s+/);
-    const keep: string[] = [];
-    for (const t of tokens) {
-      const low = t.toLowerCase();
-      if (STYLE_WORDS[low] ?? STYLE_WORDS[t]) style = (STYLE_WORDS[low] ?? STYLE_WORDS[t]) as EdgeStyle;
-      else if (ROUTE_WORDS[low] ?? ROUTE_WORDS[t]) route = (ROUTE_WORDS[low] ?? ROUTE_WORDS[t]) as EdgeRoute;
-      else keep.push(t);
-    }
-    label = keep.join(' ').trim() || undefined;
-    if (label === '""' || label === "''") label = '';
-  }
-  return { from: { node: from.node, port: from.port }, to: { node: to.node, port: to.port }, label, style, route, arrow };
+  const { head, label: rawLabel } = splitLabel(m[3].trim());
+  const to = splitEndpoint(head);
+  const { label, style, route } = rawLabel ? parseEdgeLabel(rawLabel) : { label: undefined };
+  return {
+    from: { node: from.node, port: from.port },
+    to: { node: to.node, port: to.port },
+    label,
+    style: style ?? 'wire',
+    route: route ?? 'orth',
+    arrow,
+  };
 }
 
 function normValues(raw: unknown): string[] {
@@ -224,6 +348,22 @@ function padRows(rows: TimingRow[], steps: number): void {
   }
 }
 
+/**
+ * 校验信号颜色。颜色会直接进 SVG 的 stroke/fill 属性，必须挡住带引号或尖括号的值，
+ * 否则等于给 .fpgad 开了一个往 webview 注入标签的口子。
+ */
+const COLOR_RE = /^(#[0-9a-f]{3,8}|[a-z]{3,20}|rgba?\([\d\s.,%/]+\)|hsla?\([\d\s.,%deg/]+\))$/i;
+
+function normColor(v: unknown, name: string, diags: Diagnostic[]): string | undefined {
+  const s = asString(v)?.trim();
+  if (!s) return undefined;
+  if (!COLOR_RE.test(s)) {
+    diags.push({ severity: 'warning', message: `信号 "${name}" 的颜色 "${s}" 无法识别，已忽略（支持 #rgb / #rrggbb / 颜色名）` });
+    return undefined;
+  }
+  return s;
+}
+
 /** 解析一条信号（时钟 / 单比特 / 总线 / 分组标题） */
 function makeRow(o: Record<string, any>, diags: Diagnostic[]): TimingRow | null {
   const name = asString(o.name) ?? asString(o.id) ?? '';
@@ -240,7 +380,7 @@ function makeRow(o: Record<string, any>, diags: Diagnostic[]): TimingRow | null 
     name,
     type: type as TimingRow['type'],
     values: normValues(o.values ?? o.value ?? o.wave),
-    color: asString(o.color),
+    color: normColor(o.color ?? o.colour, name, diags),
   };
   if (row.type === 'clock') {
     const freq = Number(o.freq ?? o.mhz ?? o.frequency ?? 0) || 0;
@@ -293,8 +433,7 @@ function parseTiming(d: Record<string, any>, diagram: Diagram, diags: Diagnostic
 }
 
 /** 把一个已 load 的 YAML 映射解析成一张图 */
-function parseSceneObject(d: Record<string, any>, hintKind: Kind | undefined, diags: Diagnostic[], text: string): Diagram {
-  const findLine = lineIndex(text);
+function parseSceneObject(d: Record<string, any>, hintKind: Kind | undefined, diags: Diagnostic[], idx: LineIndex): Diagram {
   let kind: Kind =
     d.kind === 'fsm' || d.kind === 'timing' || d.kind === 'block'
       ? d.kind
@@ -345,8 +484,10 @@ function parseSceneObject(d: Record<string, any>, hintKind: Kind | undefined, di
         diags.push({ severity: 'error', message: '有一个节点缺少 id（需 id / name / label 之一），已跳过' });
         continue;
       }
+      // 消耗一次行号游标：重复 id 的第二次才会拿到第二处行号
+      const idLine = idx.at(id);
       if (diagram.nodes.some((nd) => nd.id === id)) {
-        diags.push({ severity: 'error', message: `节点 id 重复："${id}"，后者已忽略`, line: findLine(`id: ${id}`) });
+        diags.push({ severity: 'error', message: `节点 id 重复："${id}"，后者已忽略`, line: idLine });
         continue;
       }
       diagram.nodes.push(makeNode(id, kind, o, diags));
@@ -354,11 +495,14 @@ function parseSceneObject(d: Record<string, any>, hintKind: Kind | undefined, di
   }
 
   // ---- edges ----
+  const edgeKey = Array.isArray(d.edges) ? 'edges' : Array.isArray(d.transitions) ? 'transitions' : Array.isArray(d.links) ? 'links' : 'edges';
   const rawEdges = d.edges ?? d.transitions ?? d.links ?? [];
   if (!Array.isArray(rawEdges)) {
     diags.push({ severity: 'error', message: 'edges 必须是列表' });
   } else {
     rawEdges.forEach((item, i) => {
+      // 每条连线按文档顺序消费一个行号，报错才能指到这一条而不是文件里第一处
+      const edgeLine = idx.nextSeq(edgeKey);
       let partial: Partial<DiagramEdge> | null = null;
       if (typeof item === 'string') {
         partial = parseEdgeString(item);
@@ -402,7 +546,7 @@ function parseSceneObject(d: Record<string, any>, hintKind: Kind | undefined, di
         diags.push({
           severity: 'error',
           message: `连线引用了不存在的节点 "${partial.from.node}"（可用节点：${known.join(', ')}）`,
-          line: findLine(partial.from.node),
+          line: edgeLine,
         });
         return;
       }
@@ -410,7 +554,7 @@ function parseSceneObject(d: Record<string, any>, hintKind: Kind | undefined, di
         diags.push({
           severity: 'error',
           message: `连线引用了不存在的节点 "${partial.to.node}"（可用节点：${known.join(', ')}）`,
-          line: findLine(partial.to.node),
+          line: edgeLine,
         });
         return;
       }
@@ -457,6 +601,8 @@ export function parseFile(text: string, hintKind?: Kind): ParseFileResult {
   }
 
   const d = doc as Record<string, any>;
+  // 用未 trim 的原文建索引，否则开头的空行会把所有行号整体偏移
+  const idx = buildLineIndex(text);
   if (Array.isArray(d.scenes)) {
     const scenes: Diagram[] = [];
     d.scenes.forEach((s: any, i: number) => {
@@ -464,7 +610,7 @@ export function parseFile(text: string, hintKind?: Kind): ParseFileResult {
         diagnostics.push({ severity: 'warning', message: `scenes[${i}] 不是映射，已跳过` });
         return;
       }
-      const scene = parseSceneObject(s as Record<string, any>, hintKind, diagnostics, text);
+      const scene = parseSceneObject(s as Record<string, any>, hintKind, diagnostics, idx);
       if (!scene.id) scene.id = `${scene.kind}-${i + 1}`;
       scenes.push(scene);
     });
@@ -477,7 +623,7 @@ export function parseFile(text: string, hintKind?: Kind): ParseFileResult {
     return { file: { scenes, active }, diagnostics };
   }
 
-  const scene = parseSceneObject(d, hintKind, diagnostics, text);
+  const scene = parseSceneObject(d, hintKind, diagnostics, idx);
   return { file: { scenes: [scene], active: 0 }, diagnostics };
 }
 

@@ -974,11 +974,11 @@ function panelBody(
     const mid = (top + bot) / 2;
 
     if (row.type === 'clock') {
-      out.push(clockPath(row, x0, sw, panel.steps, top, bot, p));
+      out.push(clockPath(row, x0, sw, panel.steps, top, bot, p, row.color));
     } else if (row.type === 'bus') {
-      out.push(busBody(row, x0, sw, panel.steps, top, bot, p));
+      out.push(busBody(row, x0, sw, panel.steps, top, bot, p, row.color));
     } else {
-      out.push(logicBody(row, x0, sw, panel.steps, top, bot, mid, p));
+      out.push(logicBody(row, x0, sw, panel.steps, top, bot, mid, p, row.color));
     }
 
     if (opt.interactive) {
@@ -1041,13 +1041,14 @@ export function effectiveValues(row: { values: string[]; type?: string }, steps:
 }
 
 function clockPath(
-  row: { period?: number; duty?: number; phase?: number },
+  row: { period?: number; duty?: number; phase?: number; color?: string },
   x0: number,
   sw: number,
   steps: number,
   top: number,
   bot: number,
   p: Palette,
+  color?: string,
 ): string {
   const period = Math.max(2, Math.round(row.period ?? 2));
   const duty = row.duty ?? 0.5;
@@ -1065,11 +1066,11 @@ function clockPath(
     d += ` H${n(x + sw)}`;
     prevHigh = isHigh;
   }
-  return `<path d="${d}" fill="none" stroke="${p.clock}" stroke-width="1.7" stroke-linejoin="miter"/>`;
+  return `<path d="${d}" fill="none" stroke="${color ?? p.clock}" stroke-width="1.7" stroke-linejoin="miter"/>`;
 }
 
 function logicBody(
-  row: { values: string[] },
+  row: { values: string[]; color?: string },
   x0: number,
   sw: number,
   steps: number,
@@ -1077,6 +1078,7 @@ function logicBody(
   bot: number,
   mid: number,
   p: Palette,
+  color?: string,
 ): string {
   const vals = effectiveValues(row as any, steps);
   const out: string[] = [];
@@ -1120,21 +1122,23 @@ function logicBody(
       d += ` H${n(x0 + (j + 1) * sw)}`;
       j++;
     }
-    out.push(`<path d="${d}" fill="none" stroke="${p.accent}" stroke-width="1.7" stroke-linejoin="miter"/>`);
+    out.push(`<path d="${d}" fill="none" stroke="${color ?? p.accent}" stroke-width="1.7" stroke-linejoin="miter"/>`);
     i = j;
   }
   return out.join('');
 }
 
 function busBody(
-  row: { values: string[] },
+  row: { values: string[]; color?: string },
   x0: number,
   sw: number,
   steps: number,
   top: number,
   bot: number,
   p: Palette,
+  color?: string,
 ): string {
+  const busColor = color ?? p.bus;
   const vals = effectiveValues(row as any, steps);
   const out: string[] = [];
   if (!steps) return '';
@@ -1165,7 +1169,7 @@ function busBody(
     // 段 = 一整格到一整格的矩形；边界永远落在格线上，
     // 值宽 1 格就是 1 拍，绝不因为"过渡斜边"看起来像半拍
     rects.push(
-      `<rect x="${n(xa)}" y="${n(top)}" width="${n(w)}" height="${n(bot - top)}" fill="${p.nodeFillAlt}" stroke="${p.bus}" stroke-width="1.3"/>`,
+      `<rect x="${n(xa)}" y="${n(top)}" width="${n(w)}" height="${n(bot - top)}" fill="${p.nodeFillAlt}" stroke="${busColor}" stroke-width="1.3"/>`,
     );
     if (measure(value, 10) + 8 < w) {
       labels.push(
@@ -1191,7 +1195,7 @@ function busBody(
     if (!a || !b || a === b || a === 'z' || b === 'z' || a === 'x' || b === 'x') continue;
     const x = x0 + i * sw;
     out.push(
-      `<path d="M${n(x - 3)},${n(top)} L${n(x + 3)},${n(bot)} M${n(x - 3)},${n(bot)} L${n(x + 3)},${n(top)}" stroke="${p.bus}" stroke-width="1" fill="none"/>`,
+      `<path d="M${n(x - 3)},${n(top)} L${n(x + 3)},${n(bot)} M${n(x - 3)},${n(bot)} L${n(x + 3)},${n(top)}" stroke="${busColor}" stroke-width="1" fill="none"/>`,
     );
   }
   out.push(...labels);

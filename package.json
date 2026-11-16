@@ -2,7 +2,7 @@
   "name": "fpga-diagram",
   "displayName": "FPGA Diagram",
   "description": "AI 友好的 FPGA 图表工具：系统框图 / 状态机 / 多组时序波形。一个文件多视图，文本即图形。",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "fpga-tools",
   "license": "MIT",
   "repository": {
@@ -25,10 +25,9 @@
     "fsm",
     "timing",
     "waveform",
-    "drawio",
     "multi-view",
     "scenes",
-    "waveform"
+    "mcp"
   ],
   "main": "./out/extension.js",
   "icon": "media/icon.png",
@@ -153,12 +152,20 @@
           "group": "navigation@9"
         }
       ]
-    }
+    },
+    "grammars": [
+      {
+        "language": "fpgad",
+        "scopeName": "source.fpgad",
+        "path": "./syntaxes/fpgad.tmLanguage.json"
+      }
+    ]
   },
   "scripts": {
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "cli": "node out/cli.js",
+    "test": "node esbuild.mjs --test && node --test \"out/test/*.test.js\"",
     "package": "node esbuild.mjs --prod && npx @vscode/vsce package --no-dependencies"
   },
   "devDependencies": {
