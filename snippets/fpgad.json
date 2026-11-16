@@ -1,0 +1,129 @@
+{
+  "Block: 框图骨架": {
+    "prefix": "fpgad-block",
+    "body": [
+      "kind: block",
+      "title: ${1:系统框图}",
+      "nodes:",
+      "  - {id: ${2:vin},  type: io,     label: ${3:输入}, ports: \"r:${4:dout}\"}",
+      "  - {id: ${5:core}, type: module, label: ${6:处理}, ports: \"l:${7:din} | r:${8:dout}\"}",
+      "  - {id: ${9:vout}, type: io,     label: ${10:输出}}",
+      "edges:",
+      "  - ${2:vin}.${4:dout} -> ${5:core}.${7:din}${11: : \"${12:24bit bus}\"}",
+      "  - ${5:core}.${8:dout} -> ${9:vout}"
+    ],
+    "description": "三段式数据通路：输入 → 模块 → 输出"
+  },
+  "Block: FIFO 数据通路": {
+    "prefix": "fpgad-fifo",
+    "body": [
+      "kind: block",
+      "title: ${1:流水线}",
+      "nodes:",
+      "  - {id: src,  type: module, label: ${2:源}}",
+      "  - {id: fifo, type: fifo,   label: ${3:行缓存}, ports: \"l:din | r:dout\"}",
+      "  - {id: dst,  type: module, label: ${4:目的}}",
+      "edges:",
+      "  - src -> fifo.din",
+      "  - fifo.dout -> dst : \"${5:总线 bus}\""
+    ],
+    "description": "带 FIFO 缓存的框图"
+  },
+  "FSM: 状态机骨架": {
+    "prefix": "fpgad-fsm",
+    "body": [
+      "kind: fsm",
+      "title: ${1:状态机}",
+      "states:",
+      "  - {id: IDLE, type: init, label: ${2:空闲}}",
+      "  - {id: ${3:RUN},  label: ${4:运行}}",
+      "  - {id: ${5:DONE}, type: final, label: ${6:完成}}",
+      "transitions:",
+      "  - IDLE -> ${3:RUN} : ${7:start}",
+      "  - ${3:RUN} -> ${5:DONE} : ${8:finish}",
+      "  - ${5:DONE} -> IDLE : ${9:ack}"
+    ],
+    "description": "初始 → 运行 → 完成 的三态机"
+  },
+  "Timing: 波形骨架": {
+    "prefix": "fpgad-timing",
+    "body": [
+      "kind: timing",
+      "title: ${1:时序}",
+      "tick: ${2:10}",
+      "steps: ${3:12}",
+      "signals:",
+      "  - {name: clk,   type: clock, freq: ${4:100}}",
+      "  - {name: rst_n, type: logic, values: \"0 ${5:1 1 1 1 1 1 1 1 1 1 1}\"}",
+      "  - {name: valid, type: logic, values: \"${6:0 0 1 1 1 1 1 1 0 0 0 0}\"}",
+      "  - {name: data,  type: bus,   values: \"${7:. . D0 D0 D1 D1 z . . . .}\"}"
+    ],
+    "description": "时钟按频率 + 复位 + 有效 + 总线（z 表示释放）"
+  },
+  "Timing: 多组时序": {
+    "prefix": "fpgad-panels",
+    "body": [
+      "kind: timing",
+      "title: ${1:多组时序}",
+      "tick: ${2:5}",
+      "panels:",
+      "  - title: ${3:写通道}",
+      "    steps: ${4:16}",
+      "    signals:",
+      "      - {name: aclk,    type: clock, freq: ${5:100}}",
+      "      - {name: awvalid, type: logic, values: \"0 1 1 0 . . . . . . . . . . . .\"}",
+      "      - {name: awaddr,  type: bus,   values: \". . A0 z . . . . . . . . . . . .\"}",
+      "  - title: ${6:读通道}",
+      "    steps: ${7:16}",
+      "    signals:",
+      "      - {name: clk_50, type: clock, freq: ${8:50}}",
+      "      - {name: rdata,  type: bus,   values: \". . D0 D1 z . . . . . . . . . . .\"}"
+    ],
+    "description": "同一张图纵向排多组时序，多时钟按频率对齐"
+  },
+  "多视图: 框图+状态机+时序": {
+    "prefix": "fpgad-scenes",
+    "body": [
+      "active: 0",
+      "scenes:",
+      "  - kind: block",
+      "    title: ${1:系统框图}",
+      "    nodes:",
+      "      - {id: ${2:vin}, type: io, label: ${3:输入}}",
+      "      - {id: ${4:core}, type: module, label: ${5:处理}}",
+      "    edges:",
+      "      - ${2:vin} -> ${4:core}",
+      "  - kind: fsm",
+      "    title: ${6:状态机}",
+      "    states:",
+      "      - {id: IDLE, type: init, label: 空闲}",
+      "      - {id: ${7:RUN}, label: 运行}",
+      "    transitions:",
+      "      - IDLE -> ${7:RUN} : start",
+      "  - kind: timing",
+      "    title: ${8:时序}",
+      "    panels:",
+      "      - title: ${9:主时序}",
+      "        steps: ${10:12}",
+      "        signals:",
+      "          - {name: clk, type: clock, freq: ${11:100}}",
+      "          - {name: valid, type: logic, values: \"0 0 1 1 1 1 0 0 0 0 0 0\"}"
+    ],
+    "description": "一个文件装多张图，页签切换不丢内容"
+  },
+  "Block: 层次框（硬件框图）": {
+    "prefix": "fpgad-frame",
+    "body": [
+      "kind: block",
+      "options:",
+      "  layout: manual",
+      "nodes:",
+      "  - {id: ${1:top}, type: frame, label: ${2:SoC_TOP}, pos: [60, 50], size: [${3:640}, ${4:380}], ports: \"l: ${5:aclk, aresetn} | r: ${6:irq, done}\"}",
+      "  - {id: ${7:sub}, type: frame, label: ${8:Sub}, style: dashed, titlePos: br, pos: [${9:110}, ${10:70}], size: [260, 160]}",
+      "  - {id: ${11:reg}, type: module, label: ${12:Reg}, pos: [${13:140}, ${14:110}], size: [120, 60]}",
+      "edges:",
+      "  - ${1:top} <-> ${11:reg} : straight"
+    ],
+    "description": "层次框 + 虚线子框 + 框边界信号（数据手册式框图）"
+  }
+}

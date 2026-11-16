@@ -1,0 +1,20 @@
+# FPGA Diagram · fsm
+kind: fsm
+title: DDR 突发读控制器
+
+states:
+  - {id: IDLE,  type: init,  label: 复位}
+  - {id: ARB,   label: 仲裁, sub: 等待授权}
+  - {id: CMD,   label: 发命令}
+  - {id: WAIT,  label: 等数据}
+  - {id: BURST, label: 突发传输}
+  - {id: DONE,  type: final, label: 完成}
+
+transitions:
+  - IDLE -> ARB : req
+  - ARB -> CMD : grant
+  - CMD -> WAIT : cmd_sent
+  - WAIT -> BURST : first_valid
+  - BURST -> WAIT : cnt < len
+  - BURST -> DONE : cnt = len
+  - DONE -> IDLE : ack

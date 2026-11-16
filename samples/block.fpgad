@@ -1,0 +1,17 @@
+# FPGA Diagram · block
+# 只写结构，坐标自动计算；拖动画布后会把 pos 回写到节点行
+kind: block
+title: 图像缩放流水线
+
+nodes:
+  - {id: vin,  type: module, label: 视频输入, sub: video_in, ports: "l:clk,rst_n | r:dout,de"}
+  - {id: csc,  type: module, label: 色彩空间转换, sub: RGB → YUV}
+  - {id: fifo, type: fifo,   label: 行缓存, sub: 2 × 2048}
+  - {id: scal, type: module, label: 双线性缩放, sub: 4×4 邻域}
+  - {id: vout, type: io,     label: 视频输出}
+
+edges:
+  - vin.dout -> csc.din : 24bit bus
+  - csc.dout -> fifo.din : 24bit bus
+  - fifo.dout -> scal.din : 24bit bus
+  - scal.dout -> vout.din : 24bit bus

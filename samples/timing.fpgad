@@ -1,0 +1,23 @@
+# FPGA Diagram · timing
+# 一条信号一行，多组时序用 panels（同图纵向排列，各有自己的时间轴）
+# 时钟写 freq（MHz），多时钟按最快时钟自动细分网格；tick 是每拍多少 ns
+# 单比特 values 用 0/1/z/x，. 表示保持；总线写值名，值保持到下一段
+kind: timing
+title: AXI 写通道时序
+tick: 5
+
+panels:
+  - title: 写地址通道
+    steps: 20
+    signals:
+      - {name: aclk, type: clock, freq: 100}
+      - {name: awvalid, type: logic, values: "0 1 1 1 1 1 0 0 0 0 . . . . . . . . . ."}
+      - {name: awready, type: logic, values: "0 0 0 1 1 0 0 0 0 0 . . . . . . . . . ."}
+      - {name: awaddr, type: bus, values: ". . A0 . . . . . . z . . . . . . . . . ."}
+  - title: 写数据通道
+    steps: 20
+    signals:
+      - {name: clk_50, type: clock, freq: 50}
+      - {name: wvalid, type: logic, values: "0 0 0 1 1 1 1 0 0 0 . . . . . . . . . ."}
+      - {name: wdata, type: bus, values: ". . . D0 D1 D2 D3 . . . z . . . . . . . ."}
+      - {name: bready, type: logic, values: "0 0 0 0 0 0 0 1 1 0 . . . . . . . . . ."}

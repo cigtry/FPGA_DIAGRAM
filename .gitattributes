@@ -1,0 +1,6 @@
+# 仓库内统一用 LF，检出时按平台转换
+* text=auto eol=lf
+
+*.png binary
+*.vsix binary
+*.map -diff

@@ -1,0 +1,172 @@
+{
+  "name": "fpga-diagram",
+  "displayName": "FPGA Diagram",
+  "description": "AI 友好的 FPGA 图表工具：系统框图 / 状态机 / 多组时序波形。一个文件多视图，文本即图形。",
+  "version": "0.2.0",
+  "publisher": "fpga-tools",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cigtry/FPGA_DIAGRAM.git"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Visualization",
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "fpga",
+    "diagram",
+    "block diagram",
+    "state machine",
+    "fsm",
+    "timing",
+    "waveform",
+    "drawio",
+    "multi-view",
+    "scenes",
+    "waveform"
+  ],
+  "main": "./out/extension.js",
+  "icon": "media/icon.png",
+  "bin": {
+    "fpga-diagram": "./out/cli.js"
+  },
+  "activationEvents": [
+    "onCustomEditor:fpgaDiagram.editor",
+    "onLanguageModelTool:fpga_draw_diagram",
+    "onCommand:fpgaDiagram.newBlock",
+    "onCommand:fpgaDiagram.newFlow",
+    "onCommand:fpgaDiagram.newFsm",
+    "onCommand:fpgaDiagram.newTiming",
+    "onCommand:fpgaDiagram.new",
+    "onCommand:fpgaDiagram.openDoc",
+    "onCommand:fpgaDiagram.openSamples"
+  ],
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "fpgaDiagram.editor",
+        "displayName": "FPGA 图表",
+        "selector": [
+          {
+            "filenamePattern": "*.fpgad"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "languages": [
+      {
+        "id": "fpgad",
+        "aliases": [
+          "FPGA Diagram",
+          "fpga"
+        ],
+        "extensions": [
+          ".fpgad"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "fpgaDiagram.new",
+        "title": "新建图表（选择类型）",
+        "category": "FPGA 图表"
+      },
+      {
+        "command": "fpgaDiagram.newBlock",
+        "title": "新建系统框图（层次）",
+        "category": "FPGA 图表"
+      },
+      {
+        "command": "fpgaDiagram.newFlow",
+        "title": "新建流程图",
+        "category": "FPGA 图表"
+      },
+      {
+        "command": "fpgaDiagram.newFsm",
+        "title": "新建状态机",
+        "category": "FPGA 图表"
+      },
+      {
+        "command": "fpgaDiagram.newTiming",
+        "title": "新建时序波形",
+        "category": "FPGA 图表"
+      },
+      {
+        "command": "fpgaDiagram.openDoc",
+        "title": "打开语法速查（给 AI 看）",
+        "category": "FPGA 图表"
+      },
+      {
+        "command": "fpgaDiagram.openSamples",
+        "title": "打开示例目录",
+        "category": "FPGA 图表"
+      }
+    ],
+    "languageModelTools": [
+      {
+        "name": "fpga_draw_diagram",
+        "displayName": "绘制 FPGA 图表",
+        "toolReferenceName": "fpgaDiagram",
+        "canBeReferencedInPrompt": true,
+        "tags": [
+          "diagram",
+          "fpga",
+          "visualization"
+        ],
+        "modelDescription": "把一段 FPGA Diagram DSL（YAML 子集）渲染成 .fpgad 图表文件并在编辑器中打开。支持 three kinds：block（系统框图/流程图）、fsm（状态机）、timing（时序波形，可含多组 panels 与多时钟 freq）。也支持 scenes 多视图：一个文件装多张图。当你需要画 FPGA 框图、状态机、时序波形时调用此工具。spec 必须是完整的 DSL 文本。",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "spec": {
+              "type": "string",
+              "description": "完整的 FPGA Diagram DSL 文本（YAML 子集），以 kind: block|fsm|timing 或 scenes: 开头"
+            },
+            "filename": {
+              "type": "string",
+              "description": "可选的文件名（不含目录），默认按标题或 kind 自动生成，扩展名自动补 .fpgad"
+            }
+          },
+          "required": [
+            "spec"
+          ]
+        }
+      }
+    ],
+    "snippets": [
+      {
+        "language": "fpgad",
+        "path": "./snippets/fpgad.json"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "fpgaDiagram.new",
+          "when": "explorerResourceIsFolder",
+          "group": "navigation@9"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "cli": "node out/cli.js",
+    "package": "node esbuild.mjs --prod && npx @vscode/vsce package --no-dependencies --allow-missing-repository"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.90.0",
+    "esbuild": "^0.24.0",
+    "js-yaml": "^4.1.0",
+    "typescript": "^5.7.0"
+  }
+}

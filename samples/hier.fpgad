@@ -1,0 +1,25 @@
+# FPGA Diagram · 层次框图
+# frame = 层次框（实线/虚线、标题、框边界信号），子块用 pos 手工摆放
+# 端口名后缀：< 入框，> 出框，<> 双向；不写则左边入、右边出
+kind: block
+options:
+  layout: manual
+
+nodes:
+  - {id: top, type: frame, label: SoC_WDG, pos: [70, 60], size: [690, 470], ports: "l: s_axi_aclk, s_axi_aresetn, s_axi_awaddr[19:0]<>, axil_rd_data<> | r: wdt_reset, wdt_interrupt, timebase_interrupt, wdt_reset_pending"}
+  - {id: axi, type: module, label: AXI4-Lite, sub: Interface, pos: [130, 120], size: [94, 330]}
+
+  - {id: legacy, type: frame, label: Legacy WDT, style: dashed, titlePos: br, pos: [250, 80], size: [420, 210]}
+  - {id: lreg, type: module, label: Legacy_reg, pos: [285, 115], size: [120, 66]}
+  - {id: lctrl, type: module, label: Legacy_ctrl, pos: [470, 105], size: [130, 100]}
+  - {id: tbase, type: frame, label: Timebase, style: dashed, titlePos: br, pos: [495, 140], size: [86, 46]}
+
+  - {id: window, type: frame, label: Window WDT, style: dashed, titlePos: br, pos: [250, 330], size: [420, 160]}
+  - {id: wreg, type: module, label: Window_reg, pos: [285, 365], size: [120, 66]}
+  - {id: wctrl, type: module, label: Window_ctrl, pos: [470, 365], size: [130, 66]}
+
+edges:
+  - axi <-> lreg : straight
+  - lreg <-> lctrl : straight
+  - axi <-> wreg : straight
+  - wreg <-> wctrl : straight

@@ -1,0 +1,18 @@
+# 依赖
+node_modules/
+
+# 构建产物（npm run build 生成）
+out/
+media/webview.js
+media/webview.js.map
+
+# 打包产物（npm run package 生成）
+*.vsix
+
+# 编辑器 / 系统
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+.DS_Store
+Thumbs.db
+*.log

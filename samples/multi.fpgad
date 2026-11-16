@@ -1,0 +1,46 @@
+# FPGA Diagram · 多视图：一个文件里装框图 + 状态机 + 两组时序
+# 编辑器顶部按页签切换，切走再切回内容都在
+active: 0
+
+scenes:
+  - kind: block
+    title: 采集通路
+    nodes:
+      - {id: adc, type: io, label: ADC 输入, ports: "r:dout"}
+      - {id: fifo, type: fifo, label: 采样缓存}
+      - {id: dsp, type: module, label: 抽取滤波}
+      - {id: dma, type: module, label: DMA 搬运}
+    edges:
+      - adc.dout -> fifo
+      - fifo -> dsp : 16bit bus
+      - dsp -> dma : 32bit bus
+
+  - kind: fsm
+    title: 采集状态机
+    states:
+      - {id: IDLE, type: init, label: 空闲}
+      - {id: FILL, label: 填充}
+      - {id: DRAIN, label: 搬运}
+      - {id: DONE, type: final, label: 结束}
+    transitions:
+      - IDLE -> FILL : start
+      - FILL -> DRAIN : half_full
+      - DRAIN -> FILL : more
+      - DRAIN -> DONE : last
+
+  - kind: timing
+    title: 采样与搬运时序
+    tick: 5
+    panels:
+      - title: 采样
+        steps: 16
+        signals:
+          - {name: adc_clk, type: clock, freq: 100}
+          - {name: adc_valid, type: logic, values: "1 1 1 1 1 1 1 1 . . . . . . . ."}
+          - {name: adc_data, type: bus, values: "A0 A1 A2 A3 A4 A5 A6 A7 z . . . . . . ."}
+      - title: 搬运
+        steps: 16
+        signals:
+          - {name: dma_clk, type: clock, freq: 50}
+          - {name: dma_req, type: logic, values: "0 0 0 1 1 1 1 1 0 0 . . . . . ."}
+          - {name: dma_data, type: bus, values: ". . . B0 B1 B2 B3 z . . . . . . . ."}
