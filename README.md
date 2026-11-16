@@ -51,6 +51,14 @@ edges:
 
 ## 安装
 
+仓库根目录直接带了发行版安装包，克隆后一条命令即可安装，不需要先构建：
+
+```bash
+code --install-extension fpga-diagram-0.2.1.vsix
+```
+
+要自己从源码出包：
+
 ```bash
 npm install
 npm run build

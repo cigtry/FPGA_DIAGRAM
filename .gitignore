@@ -7,7 +7,10 @@ media/webview.js
 media/webview.js.map
 
 # 打包产物（npm run package 生成）
+# 默认忽略，避免每次打包都把历史版本的包一起塞进提交；
+# 只白名单当前发行版，克隆下来可直接安装。
 *.vsix
+!fpga-diagram-0.2.1.vsix
 
 # 编辑器 / 系统
 .vscode/*
