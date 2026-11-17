@@ -6,6 +6,7 @@ import {
   FSM_SHAPES,
   KIND_LABEL,
   Kind,
+  PortDir,
   Side,
   TimingPanel,
   TimingRow,
@@ -41,12 +42,19 @@ const S: {
   doc: Diagram;
   fileText: string;
   lastPosted: string;
+  /** 自己发起的保存：回写被编辑器规范化后仍要识别成自己的，不当外部更新处理 */
+  echoSeq: number;
+  pendingEchoIds: Set<string>;
   diags: Diagnostic[];
   view: { x: number; y: number; k: number };
   sel: { nodes: string[]; edges: string[]; panel: number | null; row: number | null };
   activePanel: number;
   hover: string | null;
+  /** 画布背景：auto 跟随 VS Code，light/dark 强制指定 */
+  canvasTheme: 'auto' | ThemeName;
   grid: boolean;
+  /** 画布中心点标记 */
+  center: boolean;
   snap: boolean;
   brush: 'toggle' | '0' | '1' | 'z' | 'x' | 'value';
   res: { w: number; h: number };
@@ -57,18 +65,22 @@ const S: {
   /** 文档级信息（v2）：version / meta / options，随文件解析更新，保存时回写 */
   file: { version?: string; meta?: any; options?: any };
 } = {
-  kind: 'block',
-  scenes: [emptyDiagram('block')],
+  kind: 'system_block',
+  scenes: [emptyDiagram('system_block')],
   active: 0,
-  doc: emptyDiagram('block'),
+  doc: emptyDiagram('system_block'),
   fileText: '',
   lastPosted: '',
+  echoSeq: 0,
+  pendingEchoIds: new Set<string>(),
   diags: [],
   view: { x: 0, y: 0, k: 1 },
   sel: { nodes: [], edges: [], panel: null, row: null },
   activePanel: 0,
   hover: null,
+  canvasTheme: 'auto',
   grid: true,
+  center: true,
   snap: true,
   brush: 'toggle',
   res: { w: 0, h: 0 },
@@ -78,6 +90,16 @@ const S: {
   ready: false,
   file: {},
 };
+
+const savedPrefs = vscode.getState() ?? {};
+if (savedPrefs.canvasTheme === 'auto' || savedPrefs.canvasTheme === 'light' || savedPrefs.canvasTheme === 'dark') {
+  S.canvasTheme = savedPrefs.canvasTheme;
+}
+if (typeof savedPrefs.grid === 'boolean') S.grid = savedPrefs.grid;
+if (typeof savedPrefs.center === 'boolean') S.center = savedPrefs.center;
+function persistPrefs(): void {
+  vscode.setState({ canvasTheme: S.canvasTheme, grid: S.grid, center: S.center });
+}
 
 /** 当前文档快照（给 CommandStore 用） */
 function currentSnapshot(): Snapshot {
@@ -98,6 +120,7 @@ let P: Palette = palette('light');
 const stage = document.getElementById('stage') as HTMLDivElement;
 const canvas = document.getElementById('canvas') as unknown as SVGSVGElement;
 const gridSvg = document.getElementById('grid') as unknown as SVGSVGElement;
+const centerMark = document.getElementById('center-mark') as HTMLDivElement | null;
 const overlay = document.getElementById('overlay') as HTMLDivElement;
 const toolbar = document.getElementById('toolbar') as HTMLDivElement;
 const paletteEl = document.getElementById('palette') as HTMLDivElement;
@@ -121,6 +144,15 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: 
 function detectTheme(): ThemeName {
   const c = document.body.classList;
   return c.contains('vscode-dark') || c.contains('vscode-high-contrast') ? 'dark' : 'light';
+}
+
+/** 画布背景可独立于 VS Code 主题指定，颜色板和导出 SVG 都跟着它走 */
+function activeTheme(): ThemeName {
+  return S.canvasTheme === 'auto' ? detectTheme() : S.canvasTheme;
+}
+
+function applyStageTheme(): void {
+  stage.dataset.canvas = S.canvasTheme;
 }
 
 function byId<T extends DiagramNode | undefined>(id: string): T {
@@ -192,11 +224,36 @@ function applyView(): void {
   ctxZoomLabel();
 }
 
+/** 当前画布视口中心（用户坐标）；新增节点与工具栏缩放都以它为基准 */
+function canvasCenter(): Pt {
+  const r = stage.getBoundingClientRect();
+  return { x: S.view.x + r.width / S.view.k / 2, y: S.view.y + r.height / S.view.k / 2 };
+}
+
+/** 以画布中心为不动点缩放，避免缩放时整张图往左上角跑 */
+function zoomCentered(nextK: number): void {
+  const r = stage.getBoundingClientRect();
+  const c = canvasCenter();
+  const k = Math.min(4, Math.max(0.2, nextK));
+  S.view.k = k;
+  S.view.x = c.x - r.width / k / 2;
+  S.view.y = c.y - r.height / k / 2;
+  applyView();
+}
+
 function paintGrid(): void {
   const style = S.grid
     ? `<defs><pattern id="gp" width="20" height="20" patternUnits="userSpaceOnUse"><path d="M20 0 L0 0 0 20" fill="none" stroke="${P.grid}" stroke-width="1"/></pattern></defs><rect x="-5000" y="-5000" width="10000" height="10000" fill="url(#gp)"/>`
     : '';
   gridSvg.innerHTML = style;
+  paintCenterMark();
+}
+
+/** 中心点跟随画布主题变色；关掉后不渲染，避免干扰截图和导出 */
+function paintCenterMark(): void {
+  if (!centerMark) return;
+  centerMark.hidden = !S.center;
+  centerMark.style.color = P.textDim;
 }
 
 function ctxZoomLabel(): void {
@@ -226,7 +283,7 @@ function paintStatus(): void {
 function hintText(): string {
   if (S.doc.kind === 'timing') return '单击/拖拽画电平 · 总线用「值…」笔刷 · 双击信号名或总线值可改';
   if (S.sel.nodes.length > 1) return '已选中多个：可整体拖动，或用工具栏对齐';
-  return '拖动节点移动 · 拖圆点连线 · 拖图形到连线上插入 · 双击改文字 · 滚轮缩放';
+  return '拖动节点移动 · 右键拖动平移 · 滚轮缩放 · 拖圆点连线 · 拖图形到连线上插入 · 双击改文字';
 }
 
 // ------------------------------------------------------------------ history & save
@@ -254,7 +311,7 @@ function commitPending(): void {
 
 /** 把某个命令快照应用到 S（不触发新的历史记录） */
 function restore(snap: Snapshot): void {
-  S.scenes = snap.scenes?.length ? (snap.scenes as Diagram[]) : [emptyDiagram('block')];
+  S.scenes = snap.scenes?.length ? (snap.scenes as Diagram[]) : [emptyDiagram('system_block')];
   S.active = Math.min(Math.max(0, snap.active ?? 0), S.scenes.length - 1);
   S.file = {
     ...(snap.version ? { version: snap.version } : {}),
@@ -322,7 +379,9 @@ function flushSave(): void {
   S.fileText = text;
   S.lastPosted = text;
   S.posOnly = false;
-  vscode.postMessage({ type: 'edit', text });
+  const echoId = `e${++S.echoSeq}`;
+  S.pendingEchoIds.add(echoId);
+  vscode.postMessage({ type: 'edit', text, echoId });
 }
 
 // ------------------------------------------------------------------ toolbar
@@ -362,12 +421,39 @@ function paintToolbar(): void {
 
   toolbar.appendChild(el('div', 'tb-sep'));
   toolbar.appendChild(
-    tbBtn('网格', '显示网格', () => {
+    tbBtn('网格线', '显示 / 隐藏网格线', () => {
       S.grid = !S.grid;
+      persistPrefs();
       paintGrid();
       paintToolbar();
     }, { active: S.grid }),
   );
+  toolbar.appendChild(
+    tbBtn('中心点', '显示画布中心点（缩放与新增节点都以它为基准）', () => {
+      S.center = !S.center;
+      persistPrefs();
+      paintCenterMark();
+      paintToolbar();
+    }, { active: S.center }),
+  );
+  const bgGroup = el('div', 'tb-group');
+  const bgOpts: ['auto' | ThemeName, string, string][] = [
+    ['auto', '跟随', '跟随 VS Code 主题'],
+    ['light', '白底', '画布固定使用白色背景'],
+    ['dark', '黑底', '画布固定使用深色背景'],
+  ];
+  for (const [value, label, title] of bgOpts) {
+    bgGroup.appendChild(
+      tbBtn(label, title, () => {
+        if (S.canvasTheme === value) return;
+        S.canvasTheme = value;
+        persistPrefs();
+        refreshTheme();
+        paintToolbar();
+      }, { active: S.canvasTheme === value }),
+    );
+  }
+  toolbar.appendChild(bgGroup);
   toolbar.appendChild(
     tbBtn('吸附', '拖动时对齐 5px 网格', () => {
       S.snap = !S.snap;
@@ -405,22 +491,9 @@ function paintToolbar(): void {
   }
 
   toolbar.appendChild(el('div', 'tb-sep'));
-  toolbar.appendChild(
-    tbBtn('−', '缩小', () => {
-      S.view.k = Math.max(0.2, S.view.k * 0.85);
-      applyView();
-    }),
-  );
-  toolbar.appendChild(tbBtn('100%', '缩放比例，点击复位', () => {
-    S.view.k = 1;
-    applyView();
-  }, { id: 'zoom-label' }));
-  toolbar.appendChild(
-    tbBtn('+', '放大', () => {
-      S.view.k = Math.min(4, S.view.k * 1.18);
-      applyView();
-    }),
-  );
+  toolbar.appendChild(tbBtn('−', '缩小（以画布中心为基准）', () => zoomCentered(S.view.k * 0.85)));
+  toolbar.appendChild(tbBtn('100%', '缩放比例，点击复位到 100%（以画布中心为基准）', () => zoomCentered(1), { id: 'zoom-label' }));
+  toolbar.appendChild(tbBtn('+', '放大（以画布中心为基准）', () => zoomCentered(S.view.k * 1.18)));
   toolbar.appendChild(tbBtn('适应', '缩放到适应窗口 (Ctrl+0)', () => fitView()));
 
   toolbar.appendChild(el('div', 'tb-sep'));
@@ -432,7 +505,8 @@ function paintToolbar(): void {
 // ------------------------------------------------------------------ tabs（多视图）
 
 const KIND_ICON: Record<Kind, string> = { block: '▤', system_block: '▣', schematic: '⌗', datapath: '⇉', fsm: '◯', timing: '〜' };
-const ALL_KINDS: Kind[] = ['block', 'system_block', 'schematic', 'fsm', 'timing'];
+// 只保留当前支持的视图类型；block / schematic 仍可打开旧文件，但不再提供新建入口
+const ALL_KINDS: Kind[] = ['system_block', 'fsm', 'timing'];
 
 function sceneLabel(d: Diagram, i: number): string {
   return d.title?.trim() || `${KIND_LABEL[d.kind]}${i + 1}`;
@@ -460,11 +534,11 @@ function paintTabs(): void {
     tabsEl.appendChild(tab);
   });
   const add = el('button', 'tab-add', '＋');
-  add.title = '新增视图（框图 / 状态机 / 时序组），原内容不会丢失';
+  add.title = '新增视图（系统框图 / 状态机 / 时序组），原内容不会丢失';
   add.addEventListener('click', () => {
     const r = add.getBoundingClientRect();
     openPopup(r.left, r.bottom + 4, [
-      ['系统框图（流程图）', () => addScene('block')],
+      ['系统框图', () => addScene('system_block')],
       ['状态机', () => addScene('fsm')],
       ['时序波形', () => addScene('timing')],
     ]);
@@ -729,7 +803,7 @@ function paintPalette(): void {
           : '模块图形';
   paletteEl.appendChild(el('div', 'pal-title', title));
   if (S.doc.kind === 'system_block') {
-    paletteEl.appendChild(el('div', 'insp-hint', '顶层只放功能模块 / 接口 / 层次框；加法器、寄存器、时钟原语请切到「原理图」视图。'));
+    paletteEl.appendChild(el('div', 'insp-hint', '系统框图只放功能模块 / 接口 / 层次框；底层原语属于旧格式组件，写进来会有规范提示。'));
   }
   const grid = el('div', 'pal-grid');
   Object.entries(table).forEach(([type, shape]) => {
@@ -738,7 +812,7 @@ function paintPalette(): void {
     wrap.innerHTML = previewOf(type);
     if (wrap.firstElementChild) item.appendChild(wrap.firstElementChild);
     item.appendChild(el('span', '', shape.cn));
-    item.title = `添加${shape.cn}（拖到连线上可插在中间）`;
+    item.title = `添加${shape.cn}：单击放到画布中心，拖到画布指定位置，拖到连线上可插入中间`;
     item.addEventListener('pointerdown', (ev) => startPaletteDrag(ev, type));
     item.addEventListener('click', () => {
       if (paletteDragged) {
@@ -854,14 +928,30 @@ function paintPortsEditor(nd: DiagramNode): HTMLElement {
       selectInput(
         [['in', 'input'], ['out', 'output'], ['both', 'inout']],
         p.dir ?? 'in',
-        (v) => { p.dir = v as any; paint(); save(); },
+        (v) => {
+          p.dir = v as PortDir;
+          // 改方向时自动归位：输入走左、输出走右，双向留在当前竖直边时挪到左边
+          if (v === 'in') p.side = 'l';
+          else if (v === 'out') p.side = 'r';
+          else if (p.side === 't' || p.side === 'b') p.side = 'l';
+          paint();
+          paintInspector();
+          save();
+        },
       ),
     );
     row.appendChild(
       selectInput(
         [['l', '左边'], ['r', '右边'], ['t', '上边'], ['b', '下边']],
         p.side,
-        (v) => { p.side = v as Side; paint(); save(); },
+        (v) => {
+          p.side = v as Side;
+          // 选边即定默认方向：左/下输入，右/上输出；inout 保持双向
+          if (p.dir !== 'both') p.dir = v === 'l' || v === 'b' ? 'in' : 'out';
+          paint();
+          paintInspector();
+          save();
+        },
       ),
     );
     const del = el('button', 'mini-btn danger port-del', '×');
@@ -878,12 +968,18 @@ function paintPortsEditor(nd: DiagramNode): HTMLElement {
   });
 
   const addRow = el('div', 'port-actions');
+  const newDir = selectInput([['in', 'input'], ['out', 'output'], ['both', 'inout']], 'in', () => {});
+  newDir.title = '新增端口方向：input 默认左边，output 默认右边，inout 双向';
+  addRow.appendChild(newDir);
   const add = el('button', 'mini-btn', '＋端口');
   add.addEventListener('click', () => {
     let i = 1;
     while (nd.ports.some((p) => p.name === `port${i}`)) i += 1;
     const name = `port${i}`;
-    nd.ports.push({ id: name, name, side: pickPortSide(nd.ports, 'in'), dir: 'in' });
+    const dir = newDir.value as PortDir;
+    // 新增时严格按方向归边；双向端口挑最空的一侧
+    const side: Side = dir === 'in' ? 'l' : dir === 'out' ? 'r' : pickPortSide(nd.ports, 'both');
+    nd.ports.push({ id: name, name, side, dir });
     paint();
     paintInspector();
     save();
@@ -950,7 +1046,19 @@ function requestKind(target: Kind): void {
   else addScene(target);
 }
 
-function paintInspector(): void {
+/** 输入框正在编辑时不要重建属性面板：否则 IME 输入到一半会失焦 */
+function inspectorHasFocus(): boolean {
+  const a = document.activeElement;
+  return !!a && inspectorEl.contains(a) && /^(INPUT|TEXTAREA|SELECT)$/i.test(a.tagName);
+}
+
+let inspectorPending = false;
+function paintInspector(force = false): void {
+  if (!force && inspectorHasFocus()) {
+    inspectorPending = true;
+    return;
+  }
+  inspectorPending = false;
   inspectorEl.innerHTML = '';
   const diagBox = el('div');
   if (S.diags.length) {
@@ -1382,9 +1490,8 @@ function paintTimingInspector(): void {
 function addNode(type: string, at?: Pt): void {
   snapshot();
   const shape = shapeOf(type, S.doc.kind);
-  const center = at
-    ? { x: at.x - shape.w / 2, y: at.y - shape.h / 2 }
-    : { x: S.view.x + stage.clientWidth / S.view.k / 2 - shape.w / 2, y: S.view.y + stage.clientHeight / S.view.k / 2 - shape.h / 2 };
+  const c = at ?? canvasCenter();
+  const center = { x: c.x - shape.w / 2, y: c.y - shape.h / 2 };
   let id = type;
   let i = 1;
   while (S.doc.nodes.some((n) => n.id === id)) id = `${type}${++i}`;
@@ -1846,6 +1953,8 @@ function startPaletteDrag(ev: PointerEvent, type: string): void {
 // --------------------------------------------------- 连线右键菜单
 
 let openMenu: HTMLElement | null = null;
+/** 右键拖动过画布后，松手时不要再弹出连线菜单 */
+let suppressContext = false;
 
 function onMenuOutside(ev: PointerEvent): void {
   if (openMenu && openMenu.contains(ev.target as Node)) return;
@@ -1937,9 +2046,19 @@ function openEdgeMenu(x: number, y: number, edgeId: string): void {
 }
 
 stage.addEventListener('pointerdown', (ev: PointerEvent) => {
-  if (ev.button === 1 || (ev.button === 0 && spaceDown)) {
-    S.drag = { mode: 'pan', sx: ev.clientX, sy: ev.clientY, vx: S.view.x, vy: S.view.y };
+  // 右键与中键、空格+左键一样用于平移画布；右键不移动时仍保留原有菜单
+  if (ev.button === 1 || ev.button === 2 || (ev.button === 0 && spaceDown)) {
+    S.drag = {
+      mode: 'pan',
+      sx: ev.clientX,
+      sy: ev.clientY,
+      vx: S.view.x,
+      vy: S.view.y,
+      right: ev.button === 2,
+      moved: false,
+    };
     stage.setPointerCapture(ev.pointerId);
+    stage.style.cursor = 'grabbing';
     ev.preventDefault();
     return;
   }
@@ -2130,6 +2249,10 @@ window.addEventListener('pointermove', (ev: PointerEvent) => {
   }
 
   if (d.mode === 'pan') {
+    if (!d.moved && Math.hypot(ev.clientX - d.sx, ev.clientY - d.sy) > 4) {
+      d.moved = true;
+      if (d.right) suppressContext = true;
+    }
     S.view.x = d.vx - (ev.clientX - d.sx) / S.view.k;
     S.view.y = d.vy - (ev.clientY - d.sy) / S.view.k;
     applyView();
@@ -2234,6 +2357,11 @@ window.addEventListener('pointerup', (ev: PointerEvent) => {
   const d = S.drag;
   S.drag = null;
   interaction.end();
+  if (d?.mode === 'pan') {
+    stage.style.cursor = '';
+    // contextmenu 紧跟 pointerup 触发；先保留抑制标记，稍后自动清理
+    if (d.right && d.moved) window.setTimeout(() => { suppressContext = false; }, 350);
+  }
   if (tempLine) {
     tempLine.remove();
     tempLine = null;
@@ -2293,6 +2421,11 @@ window.addEventListener('pointerup', (ev: PointerEvent) => {
 });
 
 stage.addEventListener('contextmenu', (ev: MouseEvent) => {
+  if (suppressContext) {
+    suppressContext = false;
+    ev.preventDefault();
+    return;
+  }
   const target = ev.target as Element;
   // 右键拐点手柄 → 删除该拐点
   const wpEl = target.closest?.('[data-waypoint]');
@@ -2618,6 +2751,8 @@ function showDiagBanner(errs: Diagnostic[], keptLast: boolean): void {
 
 function applyFileText(text: string, external: boolean): void {
   S.fileText = text;
+  // 外部更新撞上正在编辑的属性输入：保留当前选择和面板，等用户离开输入焦点再刷新
+  const keepUi = external && inspectorHasFocus();
   const { file, diagnostics } = parseFile(text, S.kind);
   const errs = diagnostics.filter((d) => d.severity === 'error');
   S.diags = diagnostics;
@@ -2639,9 +2774,9 @@ function applyFileText(text: string, external: boolean): void {
   };
   S.doc = S.scenes[S.active];
   S.kind = S.doc.kind;
-  S.activePanel = 0;
+  if (!keepUi) S.activePanel = 0;
   showDiagBanner(errs, false);
-  if (external) {
+  if (external && !keepUi) {
     S.sel = { nodes: [], edges: [], panel: S.sel.panel, row: null };
     store.reset(currentSnapshot());
   }
@@ -2650,17 +2785,22 @@ function applyFileText(text: string, external: boolean): void {
   paintToolbar();
   paintPalette();
   paintInspector();
-  if (external) setTimeout(fitView, 20);
 }
 
 window.addEventListener('message', (ev: MessageEvent) => {
   const msg = ev.data;
   if (!msg) return;
   if (msg.type === 'update') {
+    // 自己保存触发的回写（哪怕被编辑器规范化过）不再当外部改动，避免输入中被重建
+    if (typeof msg.echoId === 'string') {
+      if (S.pendingEchoIds.delete(msg.echoId)) return;
+    }
     const text = String(msg.text ?? '');
     if (text === S.lastPosted) return;
     if (text === S.fileText && S.ready) return;
     applyFileText(text, true);
+  } else if (msg.type === 'ack') {
+    if (typeof msg.echoId === 'string') S.pendingEchoIds.delete(msg.echoId);
   } else if (msg.type === 'command') {
     if (msg.name === 'exportSvg') exportSvg();
     if (msg.name === 'exportPng') exportPng();
@@ -2673,7 +2813,8 @@ window.addEventListener('message', (ev: MessageEvent) => {
 });
 
 function refreshTheme(): void {
-  P = palette(detectTheme());
+  P = palette(activeTheme());
+  applyStageTheme();
   paintCache.clear();
   paintGrid();
   paint();
@@ -2688,8 +2829,16 @@ ro.observe(stage);
 
 // ------------------------------------------------------------------ boot
 
+// 输入期间被跳过的属性面板刷新：等焦点真正离开面板后再补一次
+inspectorEl.addEventListener('focusout', (ev) => {
+  const next = ev.relatedTarget as Node | null;
+  if (next && inspectorEl.contains(next)) return;
+  if (inspectorPending) setTimeout(() => paintInspector(true), 0);
+});
+
 function boot(): void {
-  P = palette(detectTheme());
+  P = palette(activeTheme());
+  applyStageTheme();
   paintGrid();
   paintTabs();
   paintToolbar();

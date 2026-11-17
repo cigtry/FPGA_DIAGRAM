@@ -4,28 +4,27 @@
 和 draw.io 的区别很简单：**你写文字，它算坐标**。所以它既能给人拖，也能被 AI 直接生成。
 
 ```yaml
-kind: block
+diagram_type: system_block
 nodes:
   - {id: vin,  type: io,     label: 视频输入, ports: "r:dout"}
   - {id: scal, type: module, label: 双线性缩放, ports: "l:din | r:dout"}
   - {id: vout, type: io,     label: 输出}
 edges:
   - vin.dout -> scal.din : 24bit bus
-  - scal.dout -> vout
+  - scal.dout -> vout : straight
 ```
 
 上面这段就是一张图。打开画布，它长这样：
 
 ![系统框图](docs/img/block.png)
 
-## 四种版式
+## 三种视图
 
 | 模板 | 内容 |
 |---|---|
-| **系统框图** | 层次框（实线/虚线、可嵌套）+ 子模块 + 框边界信号，画硬件框图 |
-| **流程图** | 模块从左到右串联，坐标自动排 |
+| **系统框图** | 层次框（实线/虚线、可嵌套）+ 子模块 + 框边界信号，画顶层硬件框图 |
 | **状态机** | 状态 / 转移 / 条件，环形布局 |
-| **时序波形** | 时钟（按频率）/ 单比特 / 总线，可刷波形；一组图里能排多组时序 |
+| **时序波形** | 时钟（按频率）/ 单比特 / 总线，可刷波形；一张图里能排多组时序 |
 
 顶部是**视图页签**：一张框图、一台状态机、几组时序可以放在同一个 `.fpgad` 里，点页签切换，
 **互不覆盖、切走再切回内容都在**（页签「＋」新增，双击改名）。
@@ -34,17 +33,17 @@ edges:
 
 ![层次框图](docs/img/hier.png)
 
-## 原来的三种图
+## 三种图
 
-| 类型 | `kind` | 长这样 |
+| 类型 | DSL 声明 | 长这样 |
 |---|---|---|
-| 系统框图 | `block` | ![block](docs/img/block.png) |
-| 状态机 | `fsm` | ![fsm](docs/img/fsm.png) |
-| 时序波形 | `timing` | ![timing](docs/img/timing.png) |
+| 系统框图 | `diagram_type: system_block` | ![block](docs/img/block.png) |
+| 状态机 | `kind: fsm` | ![fsm](docs/img/fsm.png) |
+| 时序波形 | `kind: timing` | ![timing](docs/img/timing.png) |
 
 图形库只做 FPGA 常用的那些，不做通用画图：
 
-- **框图**：模块、寄存器/触发器、加法器、乘法器、MUX、FIFO、RAM/ROM、时钟、IO 端口、判断、注释、分组框
+- **系统框图**：模块、IO 端口、层次框、分组、判断、注释；顶层连接默认走直线
 - **状态机**：状态、初始实心点、结束双圆、判断节点，转移可写 `条件 / 动作`，支持自环
 - **时序**：时钟（写 `freq: 100` 就是 100MHz，多时钟自动对齐）、单比特信号（`0/1/z/x`）、
   总线（分段带值标签，`z` 表示释放）、ns 时间轴与网格；一张图可纵向排多组时序，各有时长
@@ -54,7 +53,7 @@ edges:
 仓库根目录直接带了发行版安装包，克隆后一条命令即可安装，不需要先构建：
 
 ```bash
-code --install-extension fpga-diagram-2.0.0.vsix
+code --install-extension fpga-diagram-2.0.1.vsix
 ```
 
 要自己从源码出包：
@@ -62,9 +61,9 @@ code --install-extension fpga-diagram-2.0.0.vsix
 ```bash
 npm install
 npm run build
-npm test             # 解析 / 序列化 / 行号 / 颜色 回归，26 个用例
-npm run package      # 产出 fpga-diagram-2.0.0.vsix
-code --install-extension fpga-diagram-2.0.0.vsix
+npm test             # 解析 / 序列化 / 布局 / 交互回归，67 个用例
+npm run package      # 产出 fpga-diagram-2.0.1.vsix
+code --install-extension fpga-diagram-2.0.1.vsix
 ```
 
 开发调试：用 VS Code 打开本目录，按 `F5` 起扩展宿主。
@@ -72,7 +71,7 @@ code --install-extension fpga-diagram-2.0.0.vsix
 
 ## 用法
 
-- 命令面板搜 **FPGA 图表**：新建框图 / 状态机 / 时序
+- 命令面板搜 **FPGA 图表**：新建系统框图 / 状态机 / 时序
 - 资源管理器右键文件夹：新建图表
 - 已有 `.fpgad` 文件双击即打开画布；点工具栏 **源码** 切到文本编辑（有补全、Git diff、snippet）
 - 工具栏可 **导出 SVG**（矢量，插文档）或 **导出 PNG**（2x）
@@ -83,12 +82,14 @@ code --install-extension fpga-diagram-2.0.0.vsix
 |---|---|
 | 选中 / 多选 | 单击 / Ctrl+单击 / 空白处拖框选 |
 | 移动 | 拖动图形，网格吸附；方向键微调（Shift 加大步长） |
-| 改尺寸 | 角上的手柄拖动 |
+| 改尺寸 | 角上的手柄拖动（层次框 / 分组也支持） |
+| 加端口 | 右侧「＋端口」选 input / output / inout；默认分别落到左 / 右 / 空白边 |
 | 加连线 | 从图形边缘的圆点（引脚或锚点）拖到目标图形 |
 | 改文字 | 双击图形 / 双击连线 |
 | 对齐分布 | 多选后工具栏出现 6 个对齐按钮 |
 | 撤销重做 | Ctrl+Z / Ctrl+Y |
-| 缩放平移 | Ctrl+滚轮 / 触控板捏合；空格或中键拖动平移 |
+| 缩放平移 | 滚轮缩放；按住右键 / 中键 / 空格+左键拖动平移；工具栏 ± 以画布中心缩放 |
+| 画布外观 | 工具栏切换「跟随 / 白底 / 黑底」，「网格线」可独立开关；「中心点」显示视口中心的十字准星（缩放与新增节点都以此为准，仅屏幕提示，不进入导出） |
 | 批量改波形 | 时序图里选笔刷（翻转/0/1/Z/X/值…），在格子上拖过去 |
 | 改总线值 | 选「值…」笔刷点格子（或在右侧段编辑器里加段/改值/挪起点） |
 | 加信号 | 左侧「＋ 信号」→ 时钟/单比特/总线/分组；时钟在右侧填频率 |

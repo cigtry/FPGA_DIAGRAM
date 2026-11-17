@@ -130,8 +130,10 @@ function cmdFmt(file: string | undefined, o: Opts) {
 
 function cmdNew(kind: string | undefined, o: Opts) {
   const requested = String(kind ?? '').toLowerCase();
-  const k: Kind = resolveKind(requested) ?? 'block';
-  const text = sample(requested === 'multi' ? 'multi' : requested === 'hier' ? 'hier' : k);
+  const k: Kind = resolveKind(requested) ?? 'system_block';
+  // 旧类型名仍可识别，但新建一律落到当前支持的系统框图
+  const legacy = requested === 'block' || requested === 'hier' || requested === 'schematic';
+  const text = sample(requested === 'multi' ? 'multi' : legacy ? 'system_block' : k);
   if (o.out) writeFileSync(o.out, text, 'utf8');
   else process.stdout.write(text);
 }
@@ -145,7 +147,7 @@ function help() {
       '  fpga-diagram render <file.fpgad> [-o out.svg] [--theme dark|light] [--scale 2]',
       '  fpga-diagram validate <file.fpgad> [--json]',
       '  fpga-diagram fmt <file.fpgad> [-o out.fpgad]',
-      '  fpga-diagram new system_block|schematic|datapath|block|hier|fsm|timing|multi [-o out.fpgad]',
+      '  fpga-diagram new system_block|datapath|fsm|timing|multi [-o out.fpgad]',
       '  fpga-diagram mcp                 # 以 MCP server 方式启动（stdio）',
       '',
       '提示：文件参数写 - 表示从 stdin 读入。',

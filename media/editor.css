@@ -122,9 +122,10 @@ button.tb-btn:disabled:hover {
   padding: 6px 3px 4px;
   border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
   border-radius: 5px;
-  cursor: pointer;
+  cursor: grab;
   background: var(--vscode-editor-background);
 }
+.pal-item:active { cursor: grabbing; }
 
 .pal-item:hover {
   border-color: var(--vscode-focusBorder, #0b6bcb);
@@ -150,6 +151,8 @@ button.tb-btn:disabled:hover {
   background: var(--vscode-editor-background);
   min-width: 0;
 }
+#stage[data-canvas="light"] { background: #ffffff; }
+#stage[data-canvas="dark"] { background: #1e1e1e; }
 
 #grid,
 #canvas {
@@ -166,6 +169,30 @@ button.tb-btn:disabled:hover {
 
 #canvas:focus {
   outline: none;
+}
+
+/* 画布中心点：缩放不动点与新增节点的落点参考，只是视觉提示，不参与导出 */
+#center-mark {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 26px;
+  height: 26px;
+  margin: -13px 0 0 -13px;
+  pointer-events: none;
+  color: var(--vscode-editor-foreground, #333);
+  opacity: 0.6;
+  transition: opacity 0.12s ease;
+}
+
+#center-mark[hidden] {
+  display: none;
+}
+
+#center-mark svg {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 /* 解析错误横幅：浮在画布上方，不挡交互 */
@@ -218,6 +245,12 @@ button.tb-btn:disabled:hover {
 .fd-handle {
   cursor: nwse-resize;
 }
+.fd-handle[data-handle="ne"],
+.fd-handle[data-handle="sw"] { cursor: nesw-resize; }
+.fd-handle[data-handle="n"],
+.fd-handle[data-handle="s"] { cursor: ns-resize; }
+.fd-handle[data-handle="e"],
+.fd-handle[data-handle="w"] { cursor: ew-resize; }
 
 .fd-anchor {
   cursor: crosshair;

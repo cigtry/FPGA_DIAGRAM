@@ -27,16 +27,26 @@ export class FpgaEditorProvider implements vscode.CustomTextEditorProvider {
     webview.html = this.html(webview);
 
     let lastSent = document.getText();
-    const post = (text: string) => {
+    /** 正在应用 webview 自己的编辑：这时 document 事件里拿到的文本变化不算外部改动 */
+    let applyingFromWebview = false;
+    /** 编辑器可能规范化行尾/末尾换行，回写后的文本未必等于 webview 发来的文本 */
+    let pendingEchoId: string | undefined;
+    const ack = (echoId?: string) => {
+      if (echoId) void webview.postMessage({ type: 'ack', echoId });
+    };
+    const post = (text: string, echoId?: string) => {
       lastSent = text;
-      void webview.postMessage({ type: 'update', text });
+      void webview.postMessage(echoId ? { type: 'update', text, echoId } : { type: 'update', text });
     };
 
     const changeSub = vscode.workspace.onDidChangeTextDocument((e) => {
       if (e.document.uri.toString() !== document.uri.toString()) return;
+      if (applyingFromWebview) return;
       const text = document.getText();
       if (text === lastSent) return;
-      post(text);
+      const echoId = pendingEchoId;
+      pendingEchoId = undefined;
+      post(text, echoId);
     });
 
     const msgSub = webview.onDidReceiveMessage(async (msg: any) => {
@@ -46,15 +56,25 @@ export class FpgaEditorProvider implements vscode.CustomTextEditorProvider {
           break;
         case 'edit': {
           const text = String(msg.text ?? '');
+          const echoId = typeof msg.echoId === 'string' ? msg.echoId : undefined;
           if (text === document.getText()) {
             lastSent = text;
+            ack(echoId);
             return;
           }
           const edit = new vscode.WorkspaceEdit();
           const full = new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length));
           edit.replace(document.uri, full, text);
-          lastSent = text;
-          await vscode.workspace.applyEdit(edit);
+          applyingFromWebview = true;
+          pendingEchoId = echoId;
+          try {
+            await vscode.workspace.applyEdit(edit);
+            // 以实际落进 document 的文本为准，避免行尾/末尾换行规范化触发一次假外部更新
+            lastSent = document.getText();
+          } finally {
+            applyingFromWebview = false;
+            ack(echoId);
+          }
           break;
         }
         case 'export':
@@ -123,6 +143,13 @@ export class FpgaEditorProvider implements vscode.CustomTextEditorProvider {
     <div id="stage">
       <svg id="grid" xmlns="http://www.w3.org/2000/svg"></svg>
       <svg id="canvas" xmlns="http://www.w3.org/2000/svg" tabindex="0"></svg>
+      <div id="center-mark" title="画布中心：缩放与新增节点都以它为基准" aria-hidden="true">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 26 26">
+          <path d="M13 1.5v8M13 16.5v8M1.5 13h8M16.5 13h8" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>
+          <circle cx="13" cy="13" r="2.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+          <circle cx="13" cy="13" r="0.9" fill="currentColor"/>
+        </svg>
+      </div>
       <div id="diag-banner"></div>
       <div id="overlay"></div>
     </div>

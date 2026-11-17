@@ -508,11 +508,11 @@ function parseSceneObject(d: Record<string, any>, hintKind: Kind | undefined, di
       ? 'fsm'
       : d.signals || d.panels
         ? 'timing'
-        : hintKind ?? 'block');
+        : hintKind ?? 'system_block');
   if (typeRaw && !declared) {
     diags.push({
       severity: 'warning',
-      message: `未知绘图类型 "${typeRaw}"，按 ${kind} 处理（可选 block / system_block / schematic / fsm / timing）`,
+      message: `未知绘图类型 "${typeRaw}"，按 ${kind} 处理（可选 system_block / datapath / fsm / timing；旧 block / schematic 仍兼容）`,
       line: idx.key('diagram_type') ?? idx.key('kind'),
     });
   }
@@ -684,7 +684,7 @@ export function parseFile(text: string, hintKind?: Kind): ParseFileResult {
   const diagnostics: Diagnostic[] = [];
   const src = (text ?? '').trim();
   if (!src) {
-    return { file: { scenes: [emptyDiagram(hintKind ?? 'block')], active: 0 }, diagnostics };
+    return { file: { scenes: [emptyDiagram(hintKind ?? 'system_block')], active: 0 }, diagnostics };
   }
   let doc: any;
   try {
@@ -692,11 +692,11 @@ export function parseFile(text: string, hintKind?: Kind): ParseFileResult {
   } catch (e: any) {
     const line = e?.mark?.line !== undefined ? e.mark.line + 1 : e?.lineNumber;
     diagnostics.push({ severity: 'error', message: `语法错误：${e?.reason ?? e?.message ?? String(e)}`, line });
-    return { file: { scenes: [emptyDiagram(hintKind ?? 'block')], active: 0 }, diagnostics };
+    return { file: { scenes: [emptyDiagram(hintKind ?? 'system_block')], active: 0 }, diagnostics };
   }
   if (!doc || typeof doc !== 'object') {
     diagnostics.push({ severity: 'error', message: '文件内容不是有效的映射（需要 kind: 开头）' });
-    return { file: { scenes: [emptyDiagram(hintKind ?? 'block')], active: 0 }, diagnostics };
+    return { file: { scenes: [emptyDiagram(hintKind ?? 'system_block')], active: 0 }, diagnostics };
   }
 
   const d = doc as Record<string, any>;
@@ -743,7 +743,7 @@ export function parseFile(text: string, hintKind?: Kind): ParseFileResult {
     });
     if (!scenes.length) {
       diagnostics.push({ severity: 'warning', message: 'scenes 是空的，已放入一张空框图' });
-      scenes.push(emptyDiagram(hintKind ?? 'block'));
+      scenes.push(emptyDiagram(hintKind ?? 'system_block'));
     }
     let active = Number(d.active ?? 0) || 0;
     if (active < 0 || active >= scenes.length) active = 0;

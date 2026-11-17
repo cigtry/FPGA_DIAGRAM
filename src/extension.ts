@@ -16,10 +16,7 @@ export function activate(context: vscode.ExtensionContext): void {
   register('fpgaDiagram.new', async (uri?: vscode.Uri) => {
     const pick = await vscode.window.showQuickPick(
       [
-        { label: '系统框图（规范）', description: 'system_block · 顶层功能模块与接口，隐藏底层原语', k: 'system_block' },
-        { label: '原理图 / 微架构', description: 'schematic · 加法器 / 寄存器 / 时钟原语', k: 'schematic' },
-        { label: '层次框图（旧格式）', description: 'block + frame · 老图纸兼容，全组件可见', k: 'hier' },
-        { label: '流程图', description: '模块按数据流从左到右串联，坐标自动排', k: 'block' },
+        { label: '系统框图', description: 'system_block · 顶层功能模块与接口', k: 'system_block' },
         { label: '状态机', description: 'fsm · 状态 / 转移 / 条件', k: 'fsm' },
         { label: '时序波形', description: 'timing · 时钟 / 信号 / 总线', k: 'timing' },
         { label: '多视图示例', description: 'scenes · 框图 + 状态机 + 多组时序装在一个文件里', k: 'multi' },
@@ -31,9 +28,6 @@ export function activate(context: vscode.ExtensionContext): void {
   });
 
   register('fpgaDiagram.newSystem', (uri?: vscode.Uri) => newDiagram('system_block', uri));
-  register('fpgaDiagram.newSchematic', (uri?: vscode.Uri) => newDiagram('schematic', uri));
-  register('fpgaDiagram.newBlock', (uri?: vscode.Uri) => newDiagram('hier', uri));
-  register('fpgaDiagram.newFlow', (uri?: vscode.Uri) => newDiagram('block', uri));
   register('fpgaDiagram.newFsm', (uri?: vscode.Uri) => newDiagram('fsm', uri));
   register('fpgaDiagram.newTiming', (uri?: vscode.Uri) => newDiagram('timing', uri));
 
@@ -48,7 +42,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   register('fpgaDiagram.openSamples', async () => {
     const folder = await ensureSampleFolder();
-    const target = vscode.Uri.joinPath(folder, 'block-sample.fpgad');
+    const target = vscode.Uri.joinPath(folder, 'soc-top.fpgad');
     await vscode.commands.executeCommand('vscode.openWith', target, FpgaEditorProvider.viewType);
   });
 
@@ -106,9 +100,6 @@ async function ensureSampleFolder(): Promise<vscode.Uri> {
   await vscode.workspace.fs.createDirectory(folder);
   const files: [string, string][] = [
     ['system_block', 'soc-top.fpgad'],
-    ['schematic', 'datapath.fpgad'],
-    ['hier', 'soc-wdg.fpgad'],
-    ['block', 'block-flow.fpgad'],
     ['fsm', 'fsm-sample.fpgad'],
     ['timing', 'timing-sample.fpgad'],
     ['multi', 'multi-view.fpgad'],

@@ -92,12 +92,12 @@ edges:
 `;
 
 
-export const MULTI_SAMPLE = `# FPGA Diagram · 多视图：一个文件里装框图 + 状态机 + 两组时序
+export const MULTI_SAMPLE = `# FPGA Diagram · 多视图：一个文件里装系统框图 + 状态机 + 两组时序
 # 编辑器顶部按页签切换，切走再切回内容都在
 active: 0
 
 scenes:
-  - kind: block
+  - diagram_type: system_block
     title: 采集通路
     nodes:
       - {id: adc, type: io, label: ADC 输入, ports: "r:dout"}
@@ -140,8 +140,8 @@ scenes:
           - {name: dma_data, type: bus, values: ". . . B0 B1 B2 B3 z . . . . . . . ."}
 `;
 
-export const SYSTEM_SAMPLE = `# FPGA Diagram · 系统框图（顶层）
-# system_block 只放功能模块 / 接口 / 层次框；底层原语请另建 schematic 视图
+export const SYSTEM_SAMPLE = `# FPGA Diagram · 系统框图
+# system_block 放功能模块 / 接口 / 层次框，描述顶层连接关系
 # 端口后缀：< 输入，> 输出，<> 双向；也可在右侧 IO 面板里可视化增删
 diagram_type: system_block
 title: SoC 顶层框图
@@ -191,7 +191,7 @@ export function sample(name: string): string {
   if (name === 'system_block') return SYSTEM_SAMPLE;
   if (name === 'schematic') return SCHEMATIC_SAMPLE;
   if (name === 'datapath') return SCHEMATIC_SAMPLE.replace('diagram_type: schematic', 'diagram_type: datapath');
-  return name === 'fsm' ? FSM_SAMPLE : name === 'timing' ? TIMING_SAMPLE : BLOCK_SAMPLE;
+  return name === 'fsm' ? FSM_SAMPLE : name === 'timing' ? TIMING_SAMPLE : SYSTEM_SAMPLE;
 }
 
 export function sampleTitle(name: string): string {
@@ -200,5 +200,5 @@ export function sampleTitle(name: string): string {
   if (name === 'system_block') return 'SoC 顶层框图';
   if (name === 'schematic') return '数据通路微架构';
   if (name === 'datapath') return '数据通路';
-  return name === 'fsm' ? 'DDR 突发读控制器' : name === 'timing' ? 'AXI 写通道时序' : '图像缩放流水线';
+  return name === 'fsm' ? 'DDR 突发读控制器' : name === 'timing' ? 'AXI 写通道时序' : 'SoC 顶层框图';
 }

@@ -2,7 +2,7 @@
   "name": "fpga-diagram",
   "displayName": "FPGA Diagram",
   "description": "AI 友好的 FPGA 图表工具：系统框图 / 状态机 / 多组时序波形。一个文件多视图，文本即图形。",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "publisher": "fpga-tools",
   "license": "MIT",
   "repository": {
@@ -37,8 +37,7 @@
   "activationEvents": [
     "onCustomEditor:fpgaDiagram.editor",
     "onLanguageModelTool:fpga_draw_diagram",
-    "onCommand:fpgaDiagram.newBlock",
-    "onCommand:fpgaDiagram.newFlow",
+    "onCommand:fpgaDiagram.newSystem",
     "onCommand:fpgaDiagram.newFsm",
     "onCommand:fpgaDiagram.newTiming",
     "onCommand:fpgaDiagram.new",
@@ -79,22 +78,7 @@
       },
       {
         "command": "fpgaDiagram.newSystem",
-        "title": "新建系统框图（规范）",
-        "category": "FPGA 图表"
-      },
-      {
-        "command": "fpgaDiagram.newSchematic",
-        "title": "新建原理图 / 微架构",
-        "category": "FPGA 图表"
-      },
-      {
-        "command": "fpgaDiagram.newBlock",
-        "title": "新建系统框图（层次）",
-        "category": "FPGA 图表"
-      },
-      {
-        "command": "fpgaDiagram.newFlow",
-        "title": "新建流程图",
+        "title": "新建系统框图",
         "category": "FPGA 图表"
       },
       {

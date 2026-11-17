@@ -118,10 +118,11 @@ function contentBounds(d: Diagram): { x: number; y: number; w: number; h: number
     let right = nd.x + nd.w;
     if (nd.type === 'frame') {
       for (const port of nd.ports) {
-        if (port.side !== 'l' && port.side !== 'r') continue;
         const span = measure(port.name, 9.5) + 34;
         if (port.side === 'l') left = Math.min(left, nd.x - span);
-        else right = Math.max(right, nd.x + nd.w + span);
+        else if (port.side === 'r') right = Math.max(right, nd.x + nd.w + span);
+        else if (port.side === 't') y0 = Math.min(y0, nd.y - span);
+        else if (port.side === 'b') y1 = Math.max(y1, nd.y + nd.h + span);
       }
     }
     x0 = Math.min(x0, left);
@@ -359,7 +360,7 @@ function portMarks(nd: DiagramNode, p: Palette, opt: RenderOptions): string {
 }
 
 function handles(nd: DiagramNode, p: Palette): string {
-  const s = 3.2;
+  const s = 4.5;
   const pts: [string, number, number][] = [
     ['nw', nd.x, nd.y],
     ['n', nd.x + nd.w / 2, nd.y],
@@ -394,7 +395,8 @@ function anchorDots(nd: DiagramNode, p: Palette, opt: RenderOptions): string {
 function groupSvg(nd: DiagramNode, p: Palette, opt: RenderOptions): string {
   const sel = !!opt.selection?.includes(nd.id);
   const hit = opt.interactive ? ` data-node="${esc(nd.id)}" class="fd-node"` : '';
-  return `<g${hit}><rect x="${n(nd.x)}" y="${n(nd.y + 16)}" width="${n(nd.w)}" height="${n(nd.h - 16)}" rx="8" fill="${p.band}" fill-opacity="0.55" stroke="${sel ? p.accent : p.groupStroke}" stroke-width="${sel ? 1.8 : 1.1}" stroke-dasharray="6 4"/><text x="${n(nd.x + 10)}" y="${n(nd.y + 11)}" font-family="${FONT}" font-size="11.5" fill="${p.textDim}">${esc(nd.label)}</text></g>`;
+  const handlesSvg = sel && opt.handles ? handles(nd, p) : '';
+  return `<g${hit}><rect x="${n(nd.x)}" y="${n(nd.y + 16)}" width="${n(nd.w)}" height="${n(nd.h - 16)}" rx="8" fill="${p.band}" fill-opacity="0.55" stroke="${sel ? p.accent : p.groupStroke}" stroke-width="${sel ? 1.8 : 1.1}" stroke-dasharray="6 4"/><text x="${n(nd.x + 10)}" y="${n(nd.y + 11)}" font-family="${FONT}" font-size="11.5" fill="${p.textDim}">${esc(nd.label)}</text>${handlesSvg}</g>`;
 }
 
 // ---------------------------------------------------------------- frames
@@ -441,6 +443,7 @@ function frameSvg(d: Diagram, nd: DiagramNode, p: Palette, opt: RenderOptions): 
   }
 
   out.push(framePorts(nd, p, opt));
+  if (sel && opt.handles) out.push(handles(nd, p));
   void d;
   return `<g>${out.join('')}</g>`;
 }
@@ -450,28 +453,44 @@ function framePorts(nd: DiagramNode, p: Palette, opt: RenderOptions): string {
   const out: string[] = [];
   const len = 22;
   for (const port of nd.ports) {
-    if (port.side !== 'l' && port.side !== 'r') continue;
     const a = portAnchor(nd, port.side, port.name);
-    const sign = port.side === 'l' ? -1 : 1;
-    const outer = { x: a.x + sign * len, y: a.y };
-    const dir = port.dir ?? (port.side === 'l' ? 'in' : 'out');
+    // 上下边也要伸出框外，不能只在左右两侧画端口
+    const outer =
+      port.side === 'l'
+        ? { x: a.x - len, y: a.y }
+        : port.side === 'r'
+          ? { x: a.x + len, y: a.y }
+          : port.side === 't'
+            ? { x: a.x, y: a.y - len }
+            : { x: a.x, y: a.y + len };
+    // 默认：左/下为输入，右/上为输出；显式 dir 优先
+    const dir = port.dir ?? (port.side === 'l' || port.side === 'b' ? 'in' : 'out');
     const tag = opt.interactive ? ` data-anchor="${esc(nd.id)}:${port.side}:${esc(port.name)}" class="fd-anchor"` : '';
     const line =
       dir === 'in'
         ? `M${n(outer.x)},${n(outer.y)} L${n(a.x)},${n(a.y)}`
         : `M${n(a.x)},${n(a.y)} L${n(outer.x)},${n(outer.y)}`;
     const marks =
-      dir === 'in'
-        ? ' marker-end="url(#arw-wire)"'
-        : dir === 'out'
-          ? ' marker-end="url(#arw-wire)"'
-          : ' marker-start="url(#arw-wire)" marker-end="url(#arw-wire)"';
+      dir === 'both'
+        ? ' marker-start="url(#arw-wire)" marker-end="url(#arw-wire)"'
+        : ' marker-end="url(#arw-wire)"';
     out.push(`<path d="${line}" fill="none" stroke="${p.wire}" stroke-width="1.1"${marks}/>`);
-    const tx = outer.x + sign * 5;
+
+    let tx: number;
+    let ty: number;
+    let anchor: string;
+    if (port.side === 'l' || port.side === 'r') {
+      tx = outer.x + (port.side === 'l' ? -5 : 5);
+      ty = outer.y + 3.4;
+      anchor = port.side === 'l' ? 'end' : 'start';
+    } else {
+      tx = outer.x;
+      ty = port.side === 't' ? outer.y - 5 : outer.y + 12;
+      anchor = 'middle';
+    }
     out.push(
-      `<text x="${n(tx)}" y="${n(outer.y + 3.4)}" text-anchor="${sign < 0 ? 'end' : 'start'}" font-family="${MONO}" font-size="9.5" fill="${p.textDim}"${tag}>${esc(port.name)}</text>`,
+      `<text x="${n(tx)}" y="${n(ty)}" text-anchor="${anchor}" font-family="${MONO}" font-size="9.5" fill="${p.textDim}"${tag}>${esc(port.name)}</text>`,
     );
-    void tag;
   }
   return out.join('');
 }
