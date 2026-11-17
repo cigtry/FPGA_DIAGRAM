@@ -54,7 +54,7 @@ edges:
 仓库根目录直接带了发行版安装包，克隆后一条命令即可安装，不需要先构建：
 
 ```bash
-code --install-extension fpga-diagram-0.2.1.vsix
+code --install-extension fpga-diagram-2.0.0.vsix
 ```
 
 要自己从源码出包：
@@ -63,8 +63,8 @@ code --install-extension fpga-diagram-0.2.1.vsix
 npm install
 npm run build
 npm test             # 解析 / 序列化 / 行号 / 颜色 回归，26 个用例
-npm run package      # 产出 fpga-diagram-0.2.1.vsix
-code --install-extension fpga-diagram-0.2.1.vsix
+npm run package      # 产出 fpga-diagram-2.0.0.vsix
+code --install-extension fpga-diagram-2.0.0.vsix
 ```
 
 开发调试：用 VS Code 打开本目录，按 `F5` 起扩展宿主。

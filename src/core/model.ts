@@ -1,13 +1,43 @@
-export type Kind = 'block' | 'fsm' | 'timing';
+/**
+ * block 是旧文件的兼容类型（全组件、不告警）；
+ * system_block 系统框图、schematic/datapath 底层原理图或数据通路、fsm 状态机、timing 时序。
+ * datapath 是 v2 设计稿引入的叫法，组件表与 schematic 完全一致。
+ */
+export type Kind = 'block' | 'system_block' | 'schematic' | 'datapath' | 'fsm' | 'timing';
 export type Side = 'l' | 'r' | 't' | 'b';
+export type PortDir = 'in' | 'out' | 'both';
 
 export interface Port {
   id: string;
   name: string;
   side: Side;
-  /** 框边界端口的方向：进框 / 出框 / 双向（默认按所在边推断） */
-  dir?: 'in' | 'out' | 'both';
+  /** 进框 / 出框 / 双向。DSL 后缀 `<` / `>` / `<>`，等价于 input / output / inout */
+  dir?: PortDir;
+  /** 位宽标注，如 `32` / `[19:0]` / `8`。渲染在端口名旁 */
+  width?: string;
 }
+
+/** v2 节点样式覆盖（DSL NodeStyle） */
+export interface NodeStyle {
+  fill?: string;
+  stroke?: string;
+  strokeWidth?: number;
+  textColor?: string;
+  dashed?: boolean;
+}
+
+/** v2 连线视觉覆盖（DSL EdgeDef.style 对象形式） */
+export interface EdgeVisual {
+  stroke?: string;
+  strokeWidth?: number;
+  dashed?: boolean;
+  color?: string;
+}
+
+export type Point = [number, number];
+
+/** 手工拐点；存在时渲染优先于自动路由 */
+export type Waypoints = Point[];
 
 export interface DiagramNode {
   id: string;
@@ -28,6 +58,12 @@ export interface DiagramNode {
   dash?: boolean;
   /** frame 专用：标题位置，默认顶部居中 */
   titlePos?: 'top' | 'br';
+  /** 折叠状态（frame/group 用） */
+  collapsed?: boolean;
+  /** v2 样式覆盖 */
+  style?: NodeStyle;
+  /** 自定义扩展数据 */
+  data?: Record<string, unknown>;
   /** 时序图行（timing 专用） */
   row?: TimingRow;
 }
@@ -51,6 +87,10 @@ export interface DiagramEdge {
   arrow: 'end' | 'both' | 'none';
   /** 转移上的条件 / 动作，用于状态机 */
   action?: string;
+  /** v2 手工拐点；有值时覆盖自动路由 */
+  waypoints?: Waypoints;
+  /** v2 视觉覆盖 */
+  visual?: EdgeVisual;
 }
 
 export type LogicValue = '0' | '1' | 'z' | 'x';
@@ -67,6 +107,12 @@ export interface TimingRow {
   /** logic: 0/1/z/x；bus: 每格的总线值（'' 表示保持上一段） */
   values: string[];
   color?: string;
+  /** bus 位宽，如 32 / "[19:0]" */
+  width?: string;
+  /** 显式排序值；未写时按数组顺序。拖拽重排后写回顺序 */
+  order?: number;
+  /** group 类型的子信号 */
+  children?: TimingRow[];
 }
 
 /**
@@ -91,8 +137,10 @@ export interface Diagram {
   /** 时间基准：每拍多少 ns（timing 专用，默认 10） */
   tick?: number;
   options: {
-    direction: 'LR' | 'TB';
-    layout: 'auto' | 'layered' | 'circular' | 'manual';
+    direction: 'LR' | 'TB' | 'RL' | 'BT';
+    layout: 'auto' | 'layered' | 'circular' | 'grid' | 'manual' | 'sugiyama' | 'force';
+    nodeSpacing?: number;
+    layerSpacing?: number;
   };
   /** 解析期收集的问题，仅在渲染时忽略 */
   warnings: string[];
@@ -122,6 +170,39 @@ export const BLOCK_SHAPES: Record<string, ShapeDef> = {
   frame: { w: 360, h: 230, cn: '层次框' },
   diamond: { w: 124, h: 84, cn: '判断' },
 };
+
+/**
+ * 系统框图白名单：功能模块、接口、层次框与注释。
+ * 寄存器/加法器/乘法器/选择器/时钟原语属于微架构层，只有 schematic 才开放。
+ */
+export const SYSTEM_SHAPES: Record<string, ShapeDef> = {
+  module: BLOCK_SHAPES.module,
+  io: BLOCK_SHAPES.io,
+  frame: BLOCK_SHAPES.frame,
+  group: BLOCK_SHAPES.group,
+  note: BLOCK_SHAPES.note,
+  diamond: BLOCK_SHAPES.diamond,
+};
+
+/** 系统框图里出现这些组件时给规范提示（warning，不阻断渲染） */
+export const LOW_LEVEL_TYPES: Record<string, string> = {
+  reg: '寄存器',
+  adder: '加法器',
+  mult: '乘法器',
+  mux: '多路选择器',
+  clock: 'PLL / 时钟原语',
+};
+
+export function isLowLevelType(type: string): boolean {
+  return type in LOW_LEVEL_TYPES;
+}
+
+/** 按视图类型取可用组件表 */
+export function shapesFor(kind: Kind): Record<string, ShapeDef> {
+  if (kind === 'fsm') return FSM_SHAPES;
+  if (kind === 'system_block') return SYSTEM_SHAPES;
+  return BLOCK_SHAPES; // block / schematic / datapath 都用全组件表
+}
 
 export const FSM_SHAPES: Record<string, ShapeDef> = {
   state: { w: 126, h: 66, cn: '状态' },
@@ -194,19 +275,59 @@ const ALIASES: Record<string, string> = {
   分支: 'junction',
 };
 
+/** DSL 顶层类型别名（diagram_type / kind 都走这里） */
+export const KIND_ALIASES: Record<string, Kind> = {
+  block: 'block',
+  hier: 'block',
+  system: 'system_block',
+  sys: 'system_block',
+  system_block: 'system_block',
+  systemblock: 'system_block',
+  系统框图: 'system_block',
+  schematic: 'schematic',
+  sch: 'schematic',
+  原理图: 'schematic',
+  微架构: 'schematic',
+  datapath: 'datapath',
+  数据通路: 'datapath',
+  dp: 'datapath',
+  fsm: 'fsm',
+  状态机: 'fsm',
+  timing: 'timing',
+  wave: 'timing',
+  时序: 'timing',
+};
+
+export function resolveKind(raw: unknown): Kind | undefined {
+  const s = String(raw ?? '').trim();
+  return KIND_ALIASES[s.toLowerCase()] ?? KIND_ALIASES[s];
+}
+
+/** input/output/inout 与 `<`/`>`/`<>` 两套写法归一到内部值 */
+export function normalizeDir(raw: unknown): PortDir | undefined {
+  const s = String(raw ?? '').trim().toLowerCase();
+  if (!s) return undefined;
+  if (['in', 'input', '输入'].includes(s)) return 'in';
+  if (['out', 'output', '输出'].includes(s)) return 'out';
+  if (['both', 'inout', 'bidir', '双向'].includes(s)) return 'both';
+  return undefined;
+}
+
 export function resolveType(raw: string | undefined, kind: Kind): string {
   const key = (raw ?? '').trim();
   const low = key.toLowerCase();
   if (ALIASES[low]) return ALIASES[low];
   if (ALIASES[key]) return ALIASES[key];
-  const table = kind === 'fsm' ? FSM_SHAPES : BLOCK_SHAPES;
+  const table = shapesFor(kind);
   if (table[low]) return low;
   return kind === 'fsm' ? 'state' : 'module';
 }
 
 export function shapeOf(type: string, kind: Kind): ShapeDef {
-  return (kind === 'fsm' ? FSM_SHAPES[type] : BLOCK_SHAPES[type]) ??
-    (kind === 'fsm' ? FSM_SHAPES.state : BLOCK_SHAPES.module);
+  const table = shapesFor(kind);
+  // 系统框图里写了底层组件时仍按原类型渲染，警告交给解析层，不让图变形
+  const fallback = kind === 'fsm' ? FSM_SHAPES.state : kind === 'system_block' ? SYSTEM_SHAPES.module : BLOCK_SHAPES.module;
+  return table[type] ?? BLOCK_SHAPES[type] ?? fallback;
 }
 
 export function emptyDiagram(kind: Kind): Diagram {
@@ -229,14 +350,51 @@ export function nodeById(d: Diagram, id: string): DiagramNode | undefined {
   return d.nodes.find((n) => n.id === id);
 }
 
-/** 多视图文件：一个 .fpgad 可以装若干张图，页签切换，互不覆盖内容 */
+/** v2 文档元数据 */
+export interface DocMeta {
+  title?: string;
+  author?: string;
+  created?: string;
+  modified?: string;
+}
+
+/** v2 全局选项（文档级，非单张图） */
+export interface GlobalOptions {
+  grid?: boolean;
+  gridSize?: number;
+  snapToGrid?: boolean;
+  fontFamily?: string;
+  fontSize?: number;
+}
+
+/**
+ * 多视图文件：一个 .fpgad 装若干张图，页签切换，互不覆盖内容。
+ * v2 在此之上加 version / meta / options；这三个字段都是可选的，
+ * 旧文件解析出来是 v1 形态，序列化时按需要决定写不写 v2 头。
+ */
 export interface SceneFile {
   scenes: Diagram[];
   active: number;
+  version?: string;
+  meta?: DocMeta;
+  options?: GlobalOptions;
+}
+
+/**
+ * 判断一份文档是否为 v2。
+ * 只认显式的 `version` 字段：端口名里的 [19:0] 在 v1 里也会解析出 width，
+ * 若把 width 当 v2 特征，旧图纸一存盘就被升成 v2 格式，往返测试与用户预期都会被破坏。
+ * 想存成 v2 的旧图，在文件头写 `version: '2.0'` 即可显式升级。
+ */
+export function isV2(file: SceneFile): boolean {
+  return !!file.version;
 }
 
 export const KIND_LABEL: Record<Kind, string> = {
-  block: '系统框图',
+  block: '框图',
+  system_block: '系统框图',
+  schematic: '原理图',
+  datapath: '数据通路',
   fsm: '状态机',
   timing: '时序图',
 };

@@ -3,21 +3,51 @@
 > 这份文档是给 **AI / 脚本** 看的语法手册。写法刻意宽松：能省的字段都省，
 > 你只需要描述"有哪些东西、谁连谁"，坐标由布局器自动计算。
 
-一句话规则：**先写 `kind`，再写列表，边用一行 `A -> B : 标签`。**
+一句话规则：**先写 `diagram_type`（旧文件写 `kind` 也行），再写列表，边用一行 `A -> B : 标签`。**
 
 ---
 
-## 0. 四个概念
+## 0. 六个概念
 
 | 概念 | 字段 | 用途 |
 |---|---|---|
-| `kind` | `block` | 系统框图：层次框、数据通路、模块互连 |
+| `version` | `'2.0'` | **v2 文档头**（可选）：写了才输出新格式；不写就是 v1，存盘不会被迫升级 |
+| `meta` | `title/author/created/modified` | 文档元数据 |
+| `options` | `grid/gridSize/snapToGrid/fontFamily/fontSize` | 文档级全局选项 |
+| `diagram_type` | `system_block` | **系统框图**：顶层功能模块、接口、层次框（不含底层原语） |
+| | `schematic` | **原理图 / 微架构**：寄存器、加法器、乘法器、时钟原语 |
+| | `datapath` | **数据通路**：与 `schematic` 同一套组件，强调数据流 |
+| `kind`（旧写法） | `block` | 旧格式框图，全组件可见、不做规范告警 |
 | | `fsm` | 状态机、协议流程 |
 | | `timing` | 时序波形、总线读写时序 |
 | **视图** | `scenes:` | 一个 `.fpgad` 里装多张图（页签切换，互不覆盖） |
 | **时序组** | `panels:` | 一张时序图里纵向排多组波形，各有时长与时间轴 |
 
 文件扩展名 `.fpgad`。内容可以是 YAML 子集，也兼容 JSON（以 `{` 开头的按 JSON 解析）。
+
+> **v1 与 v2**：只写 `kind` / `diagram_type` 的旧文件是 v1；在文件头加一行 `version: '2.0'` 即升级为 v2，
+> 可用 `meta`、`options`、场景 `id`、节点 `style`、连线 `waypoints`、端口 `width` 等新字段。
+> 不写 `version` 时，即使读到新字段也不会改变存盘格式——旧图纸永远原样往返。
+
+### 绘图类型分层（向下兼容）
+
+新文件推荐用 `diagram_type` 声明类型，**旧文件只写 `kind` 行为完全不变**：
+
+```yaml
+diagram_type: system_block   # 顶层系统框图
+# diagram_type: schematic    # 底层原理图 / 微架构
+# kind: block                # 旧格式：全组件，不告警
+```
+
+| 类型 | 可用组件 | 说明 |
+|---|---|---|
+| `system_block` | `module` `io` `frame` `group` `note` `diamond` | 符合系统框图规范；写 `reg` / `adder` / `mult` / `mux` / `clock` 会得到 **warning**，但仍照常渲染 |
+| `schematic` | 全部 block 组件 | 底层运算、寄存、时钟原语在这里才合规 |
+| `block` | 全部 block 组件 | 老图纸兼容，不告警 |
+
+告警形如：`[规范提示] 加法器属于底层原理图组件，不建议在系统框图中使用`，带真实行号，同时出现在编辑器侧栏与 VS Code 的 Problems 面板。
+
+`diagram_type` 也可写在 `scenes:` 的每个视图里，与 `kind` 混用没问题；保存时新类型会原样写回 `diagram_type`。
 
 ### 多视图（一个文件装多张图）
 
@@ -41,9 +71,10 @@ scenes:
 
 ---
 
-## 1. 系统框图（block）
+## 1. 框图（system_block / schematic / block）
 
-`block` 有两种版式，同一个 kind：
+`system_block` 与 `schematic` 是分层后的两种框图，共享同一套节点 / 边语法，只是组件白名单不同。
+旧 `block` 有两种版式，行为保持原样：
 
 | 版式 | 写法 | 适合 |
 |---|---|---|
@@ -104,14 +135,21 @@ edges:
 | `pos` | ❌ | `[x, y]` 绝对坐标。**只在手工微调后出现**，一般不要写 |
 | `children` | ❌ | 仅 `group` / `frame` 用，列出框住哪些节点 id |
 
-### type 可选值（block）
+### type 可选值
+
+系统框图 `system_block` 可用（符合工程文档规范）：
 
 ```text
-module  模块（默认）        reg     寄存器/触发器     adder  加法器
-mult    乘法器              mux     多路选择         fifo   FIFO / 行缓存
-ram     RAM/ROM             clock   时钟模块         io     输入输出端口
-note    注释                diamond 判断/条件       group  分组框
-frame   层次框（硬件框图常用）
+module  模块（默认）    io      输入输出接口    frame   层次框
+group   分组框          note    注释            diamond 判断/条件
+```
+
+原理图 `schematic` / 旧 `block` 额外可用：
+
+```text
+reg     寄存器/触发器    adder   加法器          mult    乘法器
+mux     多路选择         fifo    FIFO / 行缓存   ram     RAM/ROM
+clock   时钟模块（PLL / MMCM / BUFG 用这个）
 ```
 
 中文别名：模块、寄存器、触发器、加法器、乘法器、多路选择、缓存、存储器、时钟、端口、注释、分组、判断、层次框。
@@ -125,6 +163,28 @@ ports: {left: [clk, rst_n], right: [dout]}
 ```
 
 侧向可用 `l/r/t/b` 或 `left/right/top/bottom` 或 `左/右/上/下`。
+
+**方向**（input / output / inout）用名字后缀，也可用对象写法：
+
+| DSL | 含义 | 对象写法 |
+|---|---|---|
+| `awaddr<` | input | `{name: awaddr, dir: input}` |
+| `wdata>` | output | `{name: wdata, dir: output}` |
+| `s_axi<>` | inout | `{name: s_axi, dir: inout}` |
+
+编辑器里选中节点后，右侧 **端口 / IO** 面板可以可视化添加、改名、改方向、改所在边、删除端口；改动会即时写回 DSL，源码始终是唯一可信源。
+
+#### 插入 AXI 标准信号组
+
+IO 面板的「插入信号组」内置三套标准接口：
+
+| 信号组 | 信号数 | 用途 |
+|---|---|---|
+| AXI4-Lite | 19 | 寄存器配置，`AW* / W* / B* / AR* / R*` |
+| AXI4-Stream | 8 | 单向数据流，`TVALID / TREADY / TDATA / TKEEP / TLAST / TID / TDEST / TUSER` |
+| AXI4-Full | 35 | 突发传输，含 `LEN / SIZE / BURST / LOCK / CACHE / QOS / REGION / LAST` |
+
+选 `master` 或 `slave` 自动翻转方向，可填前缀（如 `m_` / `s_`）。展开后就是一堆普通端口，**没有私有格式**，可逐个改名、改方向、删除；端口较多时节点会自动放大、并均匀分到四边。
 
 端口名可以带位宽下标，连线时写全名即可（方括号里的冒号不会被当成标签分隔符）：
 
@@ -158,12 +218,14 @@ edges:
 | `bus` / `总线` | 粗线，表示总线 |
 | `clock` / `clk` / `时钟` | 时钟线样式 |
 | `ctrl` / `control` / `控制` | 虚线，表示控制信号 |
-| `orth` / `折线` | 正交折线（默认） |
+| `orth` / `折线` | 正交折线（**解析默认**，老图纸不变） |
 | `straight` / `直线` | 直线 |
 | `curve` / `曲线` | 贝塞尔曲线 |
 
 > 标签有多个词时**不会**再被吞掉：`- a -> b : clk 32bit` 的文字就是 `clk 32bit`（样式仍为默认）。
 > 想同时要文字和样式，用显式写法：`- a -> b : clk 32bit style:clock`。
+
+**编辑器里新画的连线默认是直线**（`straight`），工程图习惯如此；选中连线可在属性面板切回折线。DSL 解析默认值仍是 `orth`，所以旧图纸里没写 `route` 的连线不会变样。
 
 也可以写成映射（等价，但更啰嗦）。要**指定箭头从哪条边进出**（在编辑器里插入节点后会自动写上）：
 
@@ -340,13 +402,15 @@ npx fpga-diagram fmt     a.fpgad           # 归一化格式（不改语义，�
 | `有一个节点缺少 id` | error | 三项都没有 | 至少给 `id`、`name`、`label` 之一 |
 | `panels 必须是非空列表` | error | `panels:` 下面没内容 | 删掉 `panels` 用单组写法，或补一组 |
 | `没有解析到任何节点` | warning | 列表字段名不对 | 必须是 `nodes`（fsm 可为 `states`） |
+| `[规范提示] 加法器属于底层原理图组件…` | warning | `system_block` 里写了底层原语 | 移到 `schematic` 视图，或换成 `module` |
 
 每条诊断都带行号，直接照着改即可。行号按**出现位置**算：两个同名节点、第二条坏连线都能报到自己那一行。
 
 编辑器里的表现：
 
 - 语法坏到画不出任何图元时，**画布保留上一版**，上方弹红色横幅列出前 5 条错误（带行号），改对后自动消失；
-- 只是局部出错（比如某条连线指向不存在的节点）时照常渲染其余部分，状态栏显示错误数。
+- 只是局部出错（比如某条连线指向不存在的节点）时照常渲染其余部分，状态栏显示错误数；
+- 所有诊断同步到 **Problems 面板**（来源 `FPGA Diagram`），warning 不阻断渲染。
 
 ---
 
@@ -358,3 +422,95 @@ npx fpga-diagram fmt     a.fpgad           # 归一化格式（不改语义，�
 4. 不写 `pos`、不写 `size`、不写 `options`，除非真的有特殊要求。
 5. 时序图里时钟写 `freq`，多组波形用 `panels`，总线的"无效段"用 `z`。
 6. 写完调一次 `validate`，按行号修，再 `render` 看效果。
+
+---
+
+## 7. v2 完整示例（version: '2.0'）
+
+下面是一份**合法**的 v2 多视图文档，涵盖文档头、场景 id/layout、样式、位宽、拐点、时序 group 子信号。
+注意 `scenes:` 的每一项都要以 `- ` 开头（这是 YAML 列表，漏掉会解析失败）：
+
+```yaml
+version: '2.0'
+meta:
+  title: 视频处理子系统
+  author: 张三
+options:
+  grid: true
+  gridSize: 20
+  snapToGrid: true
+active: 0
+scenes:
+  - id: arch
+    kind: system_block
+    title: 系统架构
+    layout:
+      strategy: auto        # auto / layered / grid / manual / sugiyama / force
+      direction: LR         # LR / TB / RL / BT
+      nodeSpacing: 80
+      layerSpacing: 60
+    nodes:
+      - id: camera
+        type: io
+        label: Camera Input
+        ports:
+          - {name: pixel, side: right, dir: output, width: '8'}
+      - id: scaler
+        type: module
+        label: Scaler
+        sub: 1920x1080 → 1280x720
+        style: {fill: '#eef', stroke: '#557', dashed: false}
+      - id: frame0
+        type: frame
+        label: 输出子系统
+        children: [scaler]
+        collapsed: false
+    edges:
+      - {from: camera.pixel, to: scaler, waypoints: [[110, 40], [150, 40]], visual: {stroke: '#c33', dashed: true}}
+
+  - id: ctrl
+    kind: fsm
+    title: 控制状态机
+    states:
+      - {id: idle, label: IDLE}
+      - {id: run, label: RUN}
+    transitions:
+      - idle -> run : start
+      - run -> idle : done
+
+  - id: wave
+    kind: timing
+    title: 写读时序
+    tick: 5
+    panels:
+      - title: 写通道
+        steps: 16
+        signals:
+          - {name: clk, type: clock, freq: 100}
+          - {name: awaddr, type: bus, width: '[19:0]', order: 1, values: '. A0 A1 z'}
+          - name: ctrl
+            type: group
+            children:
+              - {name: wen, type: logic, values: '0101'}
+              - {name: wdata, type: bus, width: 32, values: '1 2 3 4'}
+      - title: 读通道
+        steps: 16
+        signals:
+          - {name: clk50, type: clock, freq: 50}
+          - {name: rdata, type: bus, values: '. . D0 D1 . . z'}
+```
+
+### v2 字段速查
+
+| 位置 | 字段 | 说明 |
+|---|---|---|
+| 顶层 | `version: '2.0'` | 唯一决定是否为 v2；不写就是 v1 |
+| 顶层 | `meta` / `options` | 元数据 / 全局显示选项 |
+| 场景 | `id` / `layout` | 场景标识 / 布局策略对象 |
+| 节点 | `style` / `collapsed` / `data` | 样式覆盖 / 折叠 / 自定义数据 |
+| 端口 | `width` / `dir` | 位宽 / `input\|output\|inout` |
+| 连线 | `waypoints` / `visual` | 手工拐点 `[[x,y],…]` / 视觉覆盖 |
+| 信号 | `width` / `order` / `children` | 位宽 / 排序值 / group 子信号 |
+
+> 兼容提示：v1 里端口名本身带位宽（`awaddr[19:0]`）依然有效，解析器会自动提取成 `width`；
+> 显式 `width` 字段与名字里的 `[…]` 二者等价，写哪个都行。

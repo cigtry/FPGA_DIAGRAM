@@ -350,6 +350,64 @@ button.tb-btn:disabled:hover {
   color: var(--vscode-errorForeground, #d33);
 }
 
+/* 节点 IO 编辑器 */
+.io-editor {
+  margin: 10px 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+}
+
+.port-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 68px 64px 24px;
+  gap: 4px;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.port-row input,
+.port-row select,
+.port-actions input,
+.port-actions select {
+  width: 100%;
+  min-width: 0;
+  background: var(--vscode-input-background, rgba(128, 128, 128, 0.12));
+  color: var(--vscode-input-foreground, inherit);
+  border: 1px solid var(--vscode-input-border, rgba(128, 128, 128, 0.3));
+  border-radius: 3px;
+  padding: 3px 4px;
+  font-family: inherit;
+  font-size: 11px;
+  outline: none;
+}
+
+.port-row input:focus,
+.port-row select:focus,
+.port-actions input:focus,
+.port-actions select:focus {
+  border-color: var(--vscode-focusBorder, #0b6bcb);
+}
+
+.port-del {
+  padding: 2px 0;
+  line-height: 1;
+}
+
+.port-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.port-actions select {
+  flex: 1 1 74px;
+}
+
+.port-actions input.port-prefix {
+  flex: 1 1 48px;
+}
+
 .insp-empty {
   font-size: 11.5px;
   opacity: 0.55;
@@ -505,11 +563,12 @@ button.tb-btn:disabled:hover {
 
 .kind-row {
   width: 100%;
+  flex-wrap: wrap;
 }
 
 .kind-btn {
-  flex: 1;
-  padding: 3px 9px;
+  flex: 1 1 auto;
+  padding: 3px 5px;
   border: 0;
   border-radius: 4px;
   background: transparent;
@@ -791,4 +850,37 @@ button.seg-del:hover {
 .inline-edit.fixed {
   position: fixed;
   z-index: 75;
+}
+
+/* 拐点编辑手柄 */
+.fd-waypoint {
+  cursor: grab;
+}
+.fd-waypoint:active {
+  cursor: grabbing;
+}
+.fd-waypoint-add {
+  cursor: copy;
+  transition: r 0.1s ease;
+}
+.fd-waypoint-add:hover {
+  r: 8;
+}
+
+/* 时序信号拖拽重排 */
+.sig-item[draggable="true"] {
+  cursor: grab;
+}
+.sig-item.dragging {
+  opacity: 0.45;
+}
+.sig-item.drag-over {
+  outline: 1px dashed var(--vscode-focusBorder, #007fd4);
+  outline-offset: -1px;
+}
+.sig-drag {
+  opacity: 0.4;
+  font-size: 11px;
+  margin-right: 2px;
+  user-select: none;
 }

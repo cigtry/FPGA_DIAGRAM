@@ -47,17 +47,22 @@ export function layout(d: Diagram): void {
   }
   for (const nd of nodes) fitNode(d, nd);
 
-  const manual = d.options.layout === 'manual' || nodes.every((n) => n.pos);
+  const strategy = d.options.layout;
+  const manual = strategy === 'manual' || nodes.every((n) => n.pos);
   if (manual) {
     for (const nd of nodes) {
       const [x, y] = nd.pos ?? [0, 0];
       nd.x = x;
       nd.y = y;
     }
-  } else if (d.kind === 'fsm' && (d.options.layout === 'auto' || d.options.layout === 'circular')) {
+  } else if (d.kind === 'fsm' && (strategy === 'auto' || strategy === 'circular')) {
     circular(d, nodes);
     for (const nd of nodes) applyPos(nd);
+  } else if (strategy === 'grid') {
+    gridLayout(nodes, d.options.nodeSpacing);
+    for (const nd of nodes) applyPos(nd);
   } else {
+    // layered / sugiyama / force / auto 都走分层布局（sugiyama 即分层，force 用分层近似）
     layered(d, nodes);
     for (const nd of nodes) applyPos(nd);
   }
@@ -92,6 +97,23 @@ function applyPos(nd: DiagramNode): void {
     nd.x = nd.pos[0];
     nd.y = nd.pos[1];
   }
+}
+
+/** 网格布局：按节点数开方排成方阵，格距可用 nodeSpacing 调 */
+function gridLayout(nodes: DiagramNode[], spacing?: number): void {
+  if (!nodes.length) return;
+  const gap = spacing && spacing > 0 ? spacing : GAP_X;
+  const cols = Math.max(1, Math.ceil(Math.sqrt(nodes.length)));
+  const rows = Math.ceil(nodes.length / cols);
+  const colW = Math.max(...nodes.map((n) => n.w)) + gap;
+  const rowH = Math.max(...nodes.map((n) => n.h)) + gap;
+  nodes.forEach((nd, i) => {
+    const c = i % cols;
+    const r = Math.floor(i / cols);
+    nd.x = c * colW + (colW - nd.w) / 2;
+    nd.y = r * rowH + (rowH - nd.h) / 2;
+  });
+  void rows;
 }
 
 /** 从圆心指向节点的单位向量（用于把 init / final 摆到圆周外侧） */
@@ -269,7 +291,9 @@ function layered(d: Diagram, nodes: DiagramNode[]): void {
     }
   }
 
-  const horiz = d.options.direction === 'LR';
+  const dir = d.options.direction;
+  const horiz = dir === 'LR' || dir === 'RL';
+  const reverse = dir === 'RL' || dir === 'BT';
   const primary = (a: number, b: number) => (horiz ? a : b);
 
   // 主轴坐标
@@ -284,6 +308,15 @@ function layered(d: Diagram, nodes: DiagramNode[]): void {
     }
     cursor += layerSpan[li] + (horiz ? GAP_X : GAP_Y);
   });
+
+  // RL / BT：把主轴坐标镜像翻转，让数据流从右到左 / 从下到上
+  if (reverse) {
+    const totalMain = cursor - (horiz ? GAP_X : GAP_Y);
+    for (const n of nodes) {
+      if (horiz) n.x = totalMain - n.x - n.w;
+      else n.y = totalMain - n.y - n.h;
+    }
+  }
 
   // 交叉轴坐标
   const crossSpan = layers.map((layer) =>

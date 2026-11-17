@@ -12,10 +12,14 @@ import {
   emptyDiagram,
   emptyTimingPanel,
   shapeOf,
+  shapesFor,
   syncClockFreqs,
 } from '../core/model';
+import { BUS_GROUPS, BusGroupId, BusRole, expandBusGroup, suggestNodeSize } from '../core/busGroups';
+import { CommandStore, Snapshot, snapshotOf } from '../core/commands';
+import { InteractionManager, modeToState } from '../core/interaction';
 import { Diagnostic, parseFile } from '../core/parse';
-import { edgeMidpoint, effectiveValues, freqLabel, portAnchor, render, resolveEdge, svgDocument } from '../core/render';
+import { RenderCache, edgeMidpoint, effectiveValues, freqLabel, portAnchor, render, resolveEdge, svgDocument } from '../core/render';
 import { patchPositions, serializeFile } from '../core/serialize';
 import { sample } from '../core/examples';
 import { Palette, ThemeName, palette } from '../core/theme';
@@ -47,11 +51,11 @@ const S: {
   brush: 'toggle' | '0' | '1' | 'z' | 'x' | 'value';
   res: { w: number; h: number };
   drag: any;
-  history: string[];
-  future: string[];
   posOnly: boolean;
   dropEdge: string | null;
   ready: boolean;
+  /** 文档级信息（v2）：version / meta / options，随文件解析更新，保存时回写 */
+  file: { version?: string; meta?: any; options?: any };
 } = {
   kind: 'block',
   scenes: [emptyDiagram('block')],
@@ -69,12 +73,26 @@ const S: {
   brush: 'toggle',
   res: { w: 0, h: 0 },
   drag: null,
-  history: [],
-  future: [],
   posOnly: false,
   dropEdge: null,
   ready: false,
+  file: {},
 };
+
+/** 当前文档快照（给 CommandStore 用） */
+function currentSnapshot(): Snapshot {
+  // 必须深拷贝：S.scenes 会被原地修改，浅引用会让 before/after 变成同一份
+  return snapshotOf({
+    scenes: S.scenes as any[],
+    active: S.active,
+    ...(S.file.version ? { version: S.file.version } : {}),
+    ...(S.file.meta ? { meta: S.file.meta } : {}),
+    ...(S.file.options ? { options: S.file.options } : {}),
+  });
+}
+
+/** Command 模式的历史存储：所有可撤销变更都经它记录 */
+const store = new CommandStore(currentSnapshot());
 
 let P: Palette = palette('light');
 const stage = document.getElementById('stage') as HTMLDivElement;
@@ -143,8 +161,13 @@ function toScreen(p: Pt): Pt {
 
 // ------------------------------------------------------------------ render
 
+/** 主画布的增量渲染缓存：内容未变时跳过 layout + SVG 生成 */
+const paintCache = new RenderCache();
+/** 交互状态机：驱动画布光标与状态提示 */
+const interaction = new InteractionManager();
+
 function paint(): void {
-  const res = render(S.doc, {
+  const res = paintCache.render(S.doc, {
     theme: P,
     selection: S.sel.nodes,
     selEdges: S.sel.edges,
@@ -152,6 +175,7 @@ function paint(): void {
     anchorsOn: S.hover ?? (S.sel.nodes.length === 1 ? S.sel.nodes[0] : null),
     dropEdge: S.dropEdge ?? undefined,
     selRow: S.sel.row !== null ? { panel: S.sel.panel ?? S.activePanel, row: S.sel.row } : null,
+    waypointHandles: S.sel.edges.length === 1 && !S.sel.nodes.length,
     interactive: true,
   });
   S.res = { w: res.width, h: res.height };
@@ -207,18 +231,36 @@ function hintText(): string {
 
 // ------------------------------------------------------------------ history & save
 
-/** 历史快照覆盖所有视图，切换页签/改内容都能整体回退 */
-function snapshot(): void {
-  S.history.push(JSON.stringify({ scenes: S.scenes, active: S.active }));
-  if (S.history.length > 120) S.history.shift();
-  S.future.length = 0;
-  paintToolbar();
+/** snapshot() 在改动前调用，暂存"变更前"快照；真正提交在 flushSave 里做 */
+let pendingBefore: Snapshot | null = null;
+let pendingLabel = '编辑';
+
+/** 历史快照覆盖所有视图，切换页签/改内容都能整体回退（Command 模式） */
+function snapshot(label = '编辑'): void {
+  if (!pendingBefore) pendingBefore = currentSnapshot();
+  pendingLabel = label;
 }
 
-function restore(json: string): void {
-  const snap = JSON.parse(json) as { scenes: Diagram[]; active: number };
-  S.scenes = snap.scenes?.length ? snap.scenes : [emptyDiagram('block')];
+/** 把待提交的 before 与当前状态组成一条命令写入 store */
+function commitPending(): void {
+  if (!pendingBefore) return;
+  const before = pendingBefore;
+  pendingBefore = null;
+  const after = currentSnapshot();
+  if (JSON.stringify(before) === JSON.stringify(after)) return;
+  store.commitFrom(before, after, pendingLabel);
+  pendingLabel = '编辑';
+}
+
+/** 把某个命令快照应用到 S（不触发新的历史记录） */
+function restore(snap: Snapshot): void {
+  S.scenes = snap.scenes?.length ? (snap.scenes as Diagram[]) : [emptyDiagram('block')];
   S.active = Math.min(Math.max(0, snap.active ?? 0), S.scenes.length - 1);
+  S.file = {
+    ...(snap.version ? { version: snap.version } : {}),
+    ...(snap.meta ? { meta: snap.meta } : {}),
+    ...(snap.options ? { options: snap.options } : {}),
+  };
   S.doc = S.scenes[S.active];
   S.kind = S.doc.kind;
   const ids = new Set(S.doc.nodes.map((n) => n.id));
@@ -233,21 +275,26 @@ function restore(json: string): void {
   paintTabs();
   paintPalette();
   paintInspector();
-  save();
 }
 
 function undo(): void {
-  const prev = S.history.pop();
-  if (!prev) return;
-  S.future.push(JSON.stringify({ scenes: S.scenes, active: S.active }));
-  restore(prev);
+  commitPending();
+  const snap = store.undo();
+  if (!snap) return;
+  restore(snap);
+  paintToolbar();
+  save();
+  flash(`已撤销：${store.redoLabel() ?? ''}`);
 }
 
 function redo(): void {
-  const next = S.future.pop();
-  if (!next) return;
-  S.history.push(JSON.stringify({ scenes: S.scenes, active: S.active }));
-  restore(next);
+  commitPending();
+  const snap = store.redo();
+  if (!snap) return;
+  restore(snap);
+  paintToolbar();
+  save();
+  flash(`已重做：${store.undoLabel() ?? ''}`);
 }
 
 let saveTimer = 0;
@@ -265,10 +312,12 @@ function savePos(): void {
 }
 
 function flushSave(): void {
+  // 先把改动前暂存的快照提交成一条命令，再落盘
+  commitPending();
   let text: string | null = null;
   // 单视图文件可以只改 pos，保住用户手写的注释；多视图文件整体重写
   if (S.posOnly && S.scenes.length === 1) text = patchPositions(S.fileText, S.doc);
-  if (text === null) text = serializeFile({ scenes: S.scenes, active: S.active });
+  if (text === null) text = serializeFile({ scenes: S.scenes, active: S.active, ...S.file });
   if (text === S.lastPosted) return;
   S.fileText = text;
   S.lastPosted = text;
@@ -293,8 +342,8 @@ function tbBtn(label: string, title: string, onClick: () => void, opts: { id?: s
 
 function paintToolbar(): void {
   toolbar.innerHTML = '';
-  toolbar.appendChild(tbBtn('↶', '撤销 (Ctrl+Z)', undo, { disabled: !S.history.length }));
-  toolbar.appendChild(tbBtn('↷', '重做 (Ctrl+Y)', redo, { disabled: !S.future.length }));
+  toolbar.appendChild(tbBtn('↶', '撤销 (Ctrl+Z)', undo, { disabled: !store.canUndo() }));
+  toolbar.appendChild(tbBtn('↷', '重做 (Ctrl+Y)', redo, { disabled: !store.canRedo() }));
   toolbar.appendChild(tbBtn('删除', '删除选中 (Delete)', deleteSelection, { disabled: !S.sel.nodes.length && !S.sel.edges.length }));
   toolbar.appendChild(tbBtn('复制', '复制选中 (Ctrl+D)', duplicateSelection, { disabled: !S.sel.nodes.length }));
 
@@ -382,7 +431,8 @@ function paintToolbar(): void {
 
 // ------------------------------------------------------------------ tabs（多视图）
 
-const KIND_ICON: Record<Kind, string> = { block: '▤', fsm: '◯', timing: '〜' };
+const KIND_ICON: Record<Kind, string> = { block: '▤', system_block: '▣', schematic: '⌗', datapath: '⇉', fsm: '◯', timing: '〜' };
+const ALL_KINDS: Kind[] = ['block', 'system_block', 'schematic', 'fsm', 'timing'];
 
 function sceneLabel(d: Diagram, i: number): string {
   return d.title?.trim() || `${KIND_LABEL[d.kind]}${i + 1}`;
@@ -607,10 +657,40 @@ function paintTimingPalette(): void {
   rows.forEach((row, i) => {
     const on = S.sel.panel === S.activePanel && S.sel.row === i;
     const item = el('div', 'sig-item' + (on ? ' on' : ''));
+    item.setAttribute('draggable', 'true');
+    item.dataset.sigRow = String(i);
+    item.appendChild(el('span', 'sig-drag', '⠿'));
     item.appendChild(el('span', 'sig-type', row.type === 'clock' ? '⏱' : row.type === 'bus' ? '⇄' : row.type === 'group' ? '▬' : '⎍'));
     item.appendChild(el('span', 'sig-name', row.name));
     if (row.type === 'clock') item.appendChild(el('span', 'sig-meta', row.freq ? freqLabel(row.freq) : `${row.period ?? 2} 拍`));
-    item.title = '单击选中，双击改名';
+    item.title = '拖拽上下重排 · 单击选中 · 双击改名';
+    item.addEventListener('dragstart', (ev) => {
+      dragSigFrom = i;
+      item.classList.add('dragging');
+      interaction.begin('REORDERING');
+      if (ev.dataTransfer) {
+        ev.dataTransfer.effectAllowed = 'move';
+        ev.dataTransfer.setData('text/plain', String(i));
+      }
+    });
+    item.addEventListener('dragend', () => {
+      item.classList.remove('dragging');
+      dragSigFrom = null;
+      interaction.end();
+    });
+    item.addEventListener('dragover', (ev) => {
+      ev.preventDefault();
+      if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move';
+      item.classList.add('drag-over');
+    });
+    item.addEventListener('dragleave', () => item.classList.remove('drag-over'));
+    item.addEventListener('drop', (ev) => {
+      ev.preventDefault();
+      item.classList.remove('drag-over');
+      const from = dragSigFrom ?? Number(ev.dataTransfer?.getData('text/plain'));
+      if (from === null || Number.isNaN(from) || from === i) return;
+      reorderRow(from, i);
+    });
     item.addEventListener('click', () => {
       S.activePanel = S.sel.panel ?? S.activePanel;
       S.sel = { nodes: [], edges: [], panel: S.activePanel, row: i };
@@ -641,8 +721,16 @@ function paintPalette(): void {
     return;
   }
 
-  const table = S.doc.kind === 'fsm' ? FSM_SHAPES : BLOCK_SHAPES;
-  paletteEl.appendChild(el('div', 'pal-title', S.doc.kind === 'fsm' ? '状态图形' : '模块图形'));
+  const table = shapesFor(S.doc.kind);
+  const title =
+    S.doc.kind === 'fsm' ? '状态图形'
+      : S.doc.kind === 'system_block' ? '系统框图组件'
+        : S.doc.kind === 'schematic' ? '底层原理图组件'
+          : '模块图形';
+  paletteEl.appendChild(el('div', 'pal-title', title));
+  if (S.doc.kind === 'system_block') {
+    paletteEl.appendChild(el('div', 'insp-hint', '顶层只放功能模块 / 接口 / 层次框；加法器、寄存器、时钟原语请切到「原理图」视图。'));
+  }
   const grid = el('div', 'pal-grid');
   Object.entries(table).forEach(([type, shape]) => {
     const item = el('div', 'pal-item');
@@ -723,6 +811,133 @@ function setPorts(nd: DiagramNode, side: Side, text: string): void {
   }
 }
 
+function prunePortRefs(nd: DiagramNode): void {
+  for (const e of S.doc.edges) {
+    if (e.from.node === nd.id && e.from.port && !nd.ports.some((p) => p.name === e.from.port)) e.from.port = undefined;
+    if (e.to.node === nd.id && e.to.port && !nd.ports.some((p) => p.name === e.to.port)) e.to.port = undefined;
+  }
+}
+
+function renamePort(nd: DiagramNode, oldName: string, newName: string): void {
+  const p = nd.ports.find((x) => x.name === oldName);
+  if (!p || !newName || nd.ports.some((x) => x.name === newName)) return;
+  p.name = newName;
+  p.id = newName;
+  for (const e of S.doc.edges) {
+    if (e.from.node === nd.id && e.from.port === oldName) e.from.port = newName;
+    if (e.to.node === nd.id && e.to.port === oldName) e.to.port = newName;
+  }
+}
+
+/** 节点端口可视化编辑器：增删改名 / 方向 / 所在边，以及批量插入 AXI 信号组 */
+function paintPortsEditor(nd: DiagramNode): HTMLElement {
+  const box = el('div', 'io-editor');
+  box.appendChild(el('div', 'insp-title', `端口 / IO（${nd.ports.length}）`));
+  if (!nd.ports.length) {
+    box.appendChild(el('div', 'insp-hint', '还没有端口：点「＋端口」手动添加，或直接用下方 AXI 信号组。'));
+  }
+
+  nd.ports.forEach((p) => {
+    const row = el('div', 'port-row');
+    const name = el('input', 'port-name');
+    name.type = 'text';
+    name.value = p.name;
+    name.title = '端口名（改完按回车或切走焦点）';
+    name.addEventListener('change', () => {
+      renamePort(nd, p.name, name.value.trim());
+      paint();
+      paintInspector();
+      save();
+    });
+    row.appendChild(name);
+    row.appendChild(
+      selectInput(
+        [['in', 'input'], ['out', 'output'], ['both', 'inout']],
+        p.dir ?? 'in',
+        (v) => { p.dir = v as any; paint(); save(); },
+      ),
+    );
+    row.appendChild(
+      selectInput(
+        [['l', '左边'], ['r', '右边'], ['t', '上边'], ['b', '下边']],
+        p.side,
+        (v) => { p.side = v as Side; paint(); save(); },
+      ),
+    );
+    const del = el('button', 'mini-btn danger port-del', '×');
+    del.title = '删除端口';
+    del.addEventListener('click', () => {
+      nd.ports = nd.ports.filter((x) => x !== p);
+      prunePortRefs(nd);
+      paint();
+      paintInspector();
+      save();
+    });
+    row.appendChild(del);
+    box.appendChild(row);
+  });
+
+  const addRow = el('div', 'port-actions');
+  const add = el('button', 'mini-btn', '＋端口');
+  add.addEventListener('click', () => {
+    let i = 1;
+    while (nd.ports.some((p) => p.name === `port${i}`)) i += 1;
+    const name = `port${i}`;
+    nd.ports.push({ id: name, name, side: pickPortSide(nd.ports, 'in'), dir: 'in' });
+    paint();
+    paintInspector();
+    save();
+  });
+  addRow.appendChild(add);
+  box.appendChild(addRow);
+
+  const grpRow = el('div', 'port-actions');
+  const grp = el('select');
+  for (const g of BUS_GROUPS) {
+    const o = el('option', '', `${g.cn}（${g.signals.length}）`);
+    o.value = g.id;
+    o.title = g.desc;
+    grp.appendChild(o);
+  }
+  grpRow.appendChild(grp);
+  const role = selectInput([['master', 'master'], ['slave', 'slave']], 'master', () => {});
+  role.title = '接口方向：master 的输出对 slave 就是输入';
+  grpRow.appendChild(role);
+  const pre = el('input', 'port-prefix');
+  pre.type = 'text';
+  pre.placeholder = '前缀';
+  pre.title = '如 m_ / s_ / axi_';
+  grpRow.appendChild(pre);
+  const insert = el('button', 'mini-btn', '插入');
+  insert.title = '展开成普通端口，之后可逐个改';
+  insert.addEventListener('click', () => {
+    const fresh = expandBusGroup(grp.value as BusGroupId, role.value as BusRole, pre.value);
+    const names = new Set(fresh.map((p) => p.name));
+    nd.ports = [...nd.ports.filter((p) => !names.has(p.name)), ...fresh];
+    const [w, h] = suggestNodeSize(nd.ports, [nd.w, nd.h]);
+    nd.w = w;
+    nd.h = h;
+    nd.size = [w, h];
+    prunePortRefs(nd);
+    paint();
+    paintInspector();
+    save();
+  });
+  grpRow.appendChild(insert);
+  box.appendChild(grpRow);
+  box.appendChild(el('div', 'insp-hint', '信号组只是快速录入：展开后就是普通端口，可单独改名、改方向或删除。'));
+  return box;
+}
+
+/** 新加单个端口时按方向就近排边，最空的一边兜底；不动已有端口的 side */
+function pickPortSide(ports: { side: Side }[], dir: 'in' | 'out' | 'both'): Side {
+  const counts: Record<Side, number> = { l: 0, r: 0, t: 0, b: 0 };
+  for (const p of ports) counts[p.side] += 1;
+  const order: Side[] = dir === 'out' ? ['r', 't', 'b', 'l'] : dir === 'both' ? ['b', 't', 'l', 'r'] : ['l', 't', 'b', 'r'];
+  return order.find((s) => counts[s] < 5)
+    ?? order.slice().sort((a, b) => counts[a] - counts[b])[0];
+}
+
 function kindLabel(k: Kind): string {
   return KIND_LABEL[k];
 }
@@ -761,8 +976,7 @@ function paintInspector(): void {
       row.appendChild(field('宽', numInput(nd.w, (v) => { nd.w = Math.max(24, v); nd.size = [nd.w, nd.h]; paint(); save(); })));
       row.appendChild(field('高', numInput(nd.h, (v) => { nd.h = Math.max(24, v); nd.size = [nd.w, nd.h]; paint(); save(); })));
       inspectorEl.appendChild(row);
-      inspectorEl.appendChild(field('左侧端口（逗号分隔）', textInput(portsText(nd, 'l'), (v) => { setPorts(nd, 'l', v); paint(); save(); }, 'clk, rst_n')));
-      inspectorEl.appendChild(field('右侧端口（逗号分隔）', textInput(portsText(nd, 'r'), (v) => { setPorts(nd, 'r', v); paint(); save(); }, 'dout, valid')));
+      inspectorEl.appendChild(paintPortsEditor(nd));
     }
     if (nd.type === 'frame') {
       const row2 = el('div', 'field-row');
@@ -830,6 +1044,22 @@ function paintInspector(): void {
         selectInput([['end', '单向'], ['both', '双向'], ['none', '无']], e.arrow, (v) => { e.arrow = v as any; paint(); save(); }),
       ),
     );
+    // 拐点编辑：直线/拐点连线上显示黄色圆点，拖动调整；右键删除
+    if (e.route === 'straight' || e.waypoints?.length) {
+      inspectorEl.appendChild(
+        el('div', 'insp-hint', e.waypoints?.length ? `已设 ${e.waypoints.length} 个拐点 · 拖白色圆点调整，右键删除` : '点连线中点的黄色圆点可加拐点'),
+      );
+      if (e.waypoints?.length) {
+        const clearWp = el('button', 'mini-btn', '清除全部拐点');
+        clearWp.addEventListener('click', () => {
+          snapshot('清除拐点');
+          e.waypoints = undefined;
+          paint();
+          save();
+        });
+        inspectorEl.appendChild(clearWp);
+      }
+    }
     const ins = el('button', 'mini-btn', `在中间插入${S.doc.kind === 'fsm' ? '状态' : '模块'}`);
     ins.title = '也可直接把左侧图形拖到连线上，或选中连线按 Enter';
     ins.addEventListener('click', () => insertOnEdge(e.id, defaultInsertType()));
@@ -842,7 +1072,7 @@ function paintInspector(): void {
 
   inspectorEl.appendChild(el('div', 'insp-title', '图表属性'));
   const kindRow = el('div', 'kind-row');
-  (['block', 'fsm', 'timing'] as Kind[]).forEach((k) => {
+  ALL_KINDS.forEach((k) => {
     const b = el('button', 'kind-btn' + (S.doc.kind === k ? ' active' : ''), KIND_LABEL[k]);
     b.title = k === S.doc.kind ? '当前视图' : `切到${KIND_LABEL[k]}视图（各自内容都保留）`;
     b.addEventListener('click', () => requestKind(k));
@@ -1097,7 +1327,7 @@ function paintTimingInspector(): void {
 
   inspectorEl.appendChild(el('div', 'insp-title', '图表属性'));
   const kindRow = el('div', 'kind-row');
-  (['block', 'fsm', 'timing'] as Kind[]).forEach((k) => {
+  ALL_KINDS.forEach((k) => {
     const b = el('button', 'kind-btn' + (S.doc.kind === k ? ' active' : ''), KIND_LABEL[k]);
     b.title = k === S.doc.kind ? '当前视图' : `切到${KIND_LABEL[k]}视图（内容各自保留）`;
     b.addEventListener('click', () => requestKind(k));
@@ -1389,16 +1619,25 @@ function addTimingRow(type: 'clock' | 'logic' | 'bus' | 'group'): void {
   save();
 }
 
+/** 信号列表拖拽的源行索引（HTML5 drag） */
+let dragSigFrom: number | null = null;
+
 function moveRow(i: number, delta: number): void {
   const panel = curPanel();
   if (!panel) return;
-  const j = i + delta;
-  if (j < 0 || j >= panel.rows.length) return;
-  snapshot();
-  const [row] = panel.rows.splice(i, 1);
-  panel.rows.splice(j, 0, row);
+  reorderRow(i, i + delta);
+}
+
+/** 把第 from 行移到第 to 行位置（拖拽重排与上下按钮共用） */
+function reorderRow(from: number, to: number): void {
+  const panel = curPanel();
+  if (!panel) return;
+  if (to < 0 || to >= panel.rows.length || from < 0 || from >= panel.rows.length || from === to) return;
+  snapshot('重排信号');
+  const [row] = panel.rows.splice(from, 1);
+  panel.rows.splice(to, 0, row);
   S.sel.panel = S.activePanel;
-  S.sel.row = j;
+  S.sel.row = to;
   paint();
   paintTimingPalette();
   paintInspector();
@@ -1709,6 +1948,41 @@ stage.addEventListener('pointerdown', (ev: PointerEvent) => {
   const u = toUser(ev);
   closeInline();
 
+  const wpAddEl = target.closest('[data-waypoint-add]');
+  if (wpAddEl) {
+    const eid = wpAddEl.getAttribute('data-waypoint-add')!;
+    const e = S.doc.edges.find((x) => x.id === eid);
+    if (e) {
+      const pair = resolveEdge(S.doc, e);
+      if (pair) {
+        const midPt = e.waypoints?.length ? edgeMidpoint(S.doc, e) : { x: (pair.a.x + pair.b.x) / 2, y: (pair.a.y + pair.b.y) / 2 };
+        if (midPt) {
+          snapshot('添加拐点');
+          e.waypoints = [...(e.waypoints ?? []), [Math.round(midPt.x), Math.round(midPt.y)]];
+          paint();
+          save();
+          flash('已添加拐点，可拖动白色圆点调整');
+        }
+      }
+    }
+    ev.preventDefault();
+    return;
+  }
+
+  const wpEl = target.closest('[data-waypoint]');
+  if (wpEl) {
+    const [eid, idxStr] = String(wpEl.getAttribute('data-waypoint')).split(':');
+    const e = S.doc.edges.find((x) => x.id === eid);
+    const idx = Number(idxStr);
+    if (e?.waypoints && idx >= 0 && idx < e.waypoints.length) {
+      snapshot('移动拐点');
+      S.drag = { mode: 'waypoint', edge: e, index: idx };
+      (stage as HTMLElement).setPointerCapture(ev.pointerId);
+      ev.preventDefault();
+      return;
+    }
+  }
+
   const handleEl = target.closest('[data-handle]');
   const nd0 = selNode();
   if (handleEl && nd0) {
@@ -1833,6 +2107,15 @@ window.addEventListener('pointermove', (ev: PointerEvent) => {
   const u = toUser(ev);
   const d = S.drag;
 
+  // 同步交互状态机：有拖拽时进入对应状态，无拖拽时回到 IDLE
+  if (d) {
+    interaction.begin(modeToState(d.mode));
+    stage.style.cursor = InteractionManager.cursor(interaction.state);
+  } else if (interaction.busy) {
+    interaction.end();
+    stage.style.cursor = '';
+  }
+
   if (!d) {
     if (S.doc.kind !== 'timing' && ev.target instanceof Element && stage.contains(ev.target)) {
       const target = ev.target;
@@ -1900,6 +2183,12 @@ window.addEventListener('pointermove', (ev: PointerEvent) => {
     return;
   }
 
+  if (d.mode === 'waypoint' && d.edge?.waypoints) {
+    d.edge.waypoints[d.index] = [Math.round(u.x), Math.round(u.y)];
+    paint();
+    return;
+  }
+
   if (d.mode === 'connect' && tempLine) {
     const from = byId(d.fromNode);
     if (!from) return;
@@ -1944,6 +2233,7 @@ window.addEventListener('pointermove', (ev: PointerEvent) => {
 window.addEventListener('pointerup', (ev: PointerEvent) => {
   const d = S.drag;
   S.drag = null;
+  interaction.end();
   if (tempLine) {
     tempLine.remove();
     tempLine = null;
@@ -1968,8 +2258,9 @@ window.addEventListener('pointerup', (ev: PointerEvent) => {
           id: `e${Date.now().toString(36)}`,
           from: { node: d.fromNode, port: d.port },
           to: { node: toId },
-          style: S.doc.kind === 'fsm' ? 'wire' : 'wire',
-          route: 'orth',
+          style: 'wire',
+          // 系统框图工程习惯用直线；状态机仍用折线。解析层默认不改，旧图纸不受影响
+          route: S.doc.kind === 'fsm' ? 'orth' : 'straight',
           arrow: 'end',
         });
         S.sel = { nodes: [], edges: [], panel: S.sel.panel, row: null };
@@ -1989,6 +2280,12 @@ window.addEventListener('pointerup', (ev: PointerEvent) => {
     return;
   }
 
+  if (d.mode === 'waypoint') {
+    paintInspector();
+    save();
+    return;
+  }
+
   if (d.mode === 'paint') {
     paintInspector();
     save();
@@ -1997,6 +2294,23 @@ window.addEventListener('pointerup', (ev: PointerEvent) => {
 
 stage.addEventListener('contextmenu', (ev: MouseEvent) => {
   const target = ev.target as Element;
+  // 右键拐点手柄 → 删除该拐点
+  const wpEl = target.closest?.('[data-waypoint]');
+  if (wpEl) {
+    ev.preventDefault();
+    const [eid, idxStr] = String(wpEl.getAttribute('data-waypoint')).split(':');
+    const e = S.doc.edges.find((x) => x.id === eid);
+    const idx = Number(idxStr);
+    if (e?.waypoints && idx >= 0 && idx < e.waypoints.length) {
+      snapshot('删除拐点');
+      e.waypoints.splice(idx, 1);
+      if (!e.waypoints.length) e.waypoints = undefined;
+      paint();
+      save();
+      flash('已删除拐点');
+    }
+    return;
+  }
   const edgeEl = target.closest?.('[data-edge]');
   if (!edgeEl) return;
   ev.preventDefault();
@@ -2318,14 +2632,18 @@ function applyFileText(text: string, external: boolean): void {
 
   S.scenes = file.scenes;
   S.active = file.active;
+  S.file = {
+    ...(file.version ? { version: file.version } : {}),
+    ...(file.meta ? { meta: file.meta } : {}),
+    ...(file.options ? { options: file.options } : {}),
+  };
   S.doc = S.scenes[S.active];
   S.kind = S.doc.kind;
   S.activePanel = 0;
   showDiagBanner(errs, false);
   if (external) {
     S.sel = { nodes: [], edges: [], panel: S.sel.panel, row: null };
-    S.history.length = 0;
-    S.future.length = 0;
+    store.reset(currentSnapshot());
   }
   paint();
   paintTabs();
@@ -2356,6 +2674,7 @@ window.addEventListener('message', (ev: MessageEvent) => {
 
 function refreshTheme(): void {
   P = palette(detectTheme());
+  paintCache.clear();
   paintGrid();
   paint();
   paintPalette();
@@ -2383,4 +2702,4 @@ function boot(): void {
 boot();
 
 // 供调试
-(window as any).__fd = { S, paint, render, serializeFile, parseFile, insertOnEdge, addScene, switchScene };
+(window as any).__fd = { S, store, paint, paintPalette, paintInspector, render, serializeFile, parseFile, insertOnEdge, addScene, switchScene, undo, redo, snapshot, commitPending };

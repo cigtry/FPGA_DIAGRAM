@@ -1,0 +1,18 @@
+# FPGA Diagram · 系统框图（顶层）
+# system_block 只放功能模块 / 接口 / 层次框；底层原语请另建 schematic 视图
+# 端口后缀：< 输入，> 输出，<> 双向；也可在右侧 IO 面板里可视化增删
+diagram_type: system_block
+title: SoC 顶层框图
+
+nodes:
+  - {id: top, type: frame, label: SoC, size: [620, 300], ports: "l: s_axi_aclk<, s_axi_aresetn<, s_axi_awaddr[19:0]<> | r: irq>"}
+  - {id: axi, type: module, label: AXI4-Lite, sub: 寄存器配置, ports: "l: s_axi_aclk< | r: reg_write>"}
+  - {id: core, type: module, label: 处理核心, ports: "l: reg_write< | r: data_valid>"}
+  - {id: dma, type: module, label: DMA, ports: "l: data_valid< | r: m_axi_tdata>"}
+  - {id: out, type: io, label: 对外接口}
+
+edges:
+  - top.s_axi_aclk -> axi.s_axi_aclk : straight
+  - axi.reg_write -> core.reg_write : straight
+  - core.data_valid -> dma.data_valid : straight
+  - dma.m_axi_tdata -> out : straight

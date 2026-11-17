@@ -1,4 +1,4 @@
-import { Diagram, DiagramEdge, DiagramNode, SceneFile, shapeOf } from './model';
+import { Diagram, DiagramEdge, DiagramNode, SceneFile, TimingRow, isV2, shapeOf } from './model';
 
 function q(s: string): string {
   if (s === '') return '""';
@@ -14,11 +14,17 @@ function q(s: string): string {
 
 function portsSpec(nd: DiagramNode): string | undefined {
   if (!nd.ports.length) return undefined;
+  // 统一用紧凑字符串写法：位宽拼进名字（解析端会从 [19:0] 提取回 width），
+  // 方向用 < > <> 后缀。这样端口能内联在节点的单行 {…} 里，往返无损。
   const groups: string[] = [];
   for (const side of ['l', 'r', 't', 'b'] as const) {
     const list = nd.ports
       .filter((p) => p.side === side)
-      .map((p) => (p.dir === 'both' ? `${p.name}<>` : p.dir === 'out' ? `${p.name}>` : p.dir === 'in' ? `${p.name}<` : p.name));
+      .map((p) => {
+        const w = p.width ? `[${p.width}]` : '';
+        const base = `${p.name}${w}`;
+        return p.dir === 'both' ? `${base}<>` : p.dir === 'out' ? `${base}>` : p.dir === 'in' ? `${base}<` : base;
+      });
     if (list.length) groups.push(`${side}:${list.join(',')}`);
   }
   return groups.join(' | ');
@@ -41,8 +47,9 @@ function edgeLine(d: Diagram, e: DiagramEdge): string {
   if (e.style !== 'wire') tailBits.push(e.style);
   if (e.route !== 'orth') tailBits.push(e.route);
   const tail = tailBits.length ? ` : ${tailBits.join(' ')}` : '';
-  // 端点写成映射时不能用箭头简写，退回字段写法
-  if (from.startsWith('{') || to.startsWith('{')) {
+  // 拐点 / 视觉覆盖 / 端点映射任一存在时，退回字段写法（箭头简写放不下这些）
+  const needsObj = from.startsWith('{') || to.startsWith('{') || !!e.waypoints?.length || !!e.visual;
+  if (needsObj) {
     const obj = [
       `from: ${from}`,
       `to: ${to}`,
@@ -51,6 +58,17 @@ function edgeLine(d: Diagram, e: DiagramEdge): string {
       e.action ? `action: ${q(e.action)}` : '',
       e.style !== 'wire' ? `style: ${e.style}` : '',
       e.route !== 'orth' ? `route: ${e.route}` : '',
+      e.waypoints?.length ? `waypoints: [${e.waypoints.map((p) => `[${p[0]}, ${p[1]}]`).join(', ')}]` : '',
+      e.visual
+        ? `visual: {${[
+            e.visual.stroke ? `stroke: ${q(e.visual.stroke)}` : '',
+            e.visual.color ? `color: ${q(e.visual.color)}` : '',
+            e.visual.strokeWidth ? `strokeWidth: ${e.visual.strokeWidth}` : '',
+            e.visual.dashed ? 'dashed: true' : '',
+          ]
+            .filter(Boolean)
+            .join(', ')}}`
+        : '',
     ]
       .filter(Boolean)
       .join(', ');
@@ -64,12 +82,20 @@ function edgeLine(d: Diagram, e: DiagramEdge): string {
 function sceneLines(d: Diagram): string[] {
   if (d.kind === 'timing') return timingLines(d);
   const out: string[] = [];
-  out.push(`kind: ${d.kind}`);
+  // 新增的两种分层类型用 diagram_type 写回；旧三种继续写 kind，老工具链读得懂
+  const kindField = d.kind === 'system_block' || d.kind === 'schematic' ? 'diagram_type' : 'kind';
+  out.push(`${kindField}: ${d.kind}`);
   if (d.title) out.push(`title: ${q(d.title)}`);
   const optLines: string[] = [];
   if (d.options.direction !== 'LR') optLines.push(`  direction: ${d.options.direction}`);
-  if (d.options.layout !== 'auto') optLines.push(`  layout: ${d.options.layout}`);
-  if (optLines.length) out.push('options:\n' + optLines.join('\n'));
+  if (!['auto', 'layered', 'circular'].includes(d.options.layout)) optLines.push(`  strategy: ${d.options.layout}`);
+  else if (d.options.layout !== 'auto') optLines.push(`  layout: ${d.options.layout}`);
+  if (Number(d.options.nodeSpacing) > 0) optLines.push(`  nodeSpacing: ${d.options.nodeSpacing}`);
+  if (Number(d.options.layerSpacing) > 0) optLines.push(`  layerSpacing: ${d.options.layerSpacing}`);
+  if (optLines.length) {
+    out.push('layout:');
+    for (const l of optLines) out.push(l);
+  }
   out.push('');
 
   const nodeKey = d.kind === 'fsm' ? 'states' : 'nodes';
@@ -87,9 +113,20 @@ function sceneLines(d: Diagram): string[] {
       fields.push(`children: [${nd.children.map((c) => q(c)).join(', ')}]`);
     }
     if (nd.type === 'frame') {
-      if (nd.dash) fields.push('style: dashed');
+      if (nd.dash && !nd.style) fields.push('style: dashed');
       if (nd.titlePos === 'br') fields.push('titlePos: br');
     }
+    if (nd.style) {
+      const sv: string[] = [];
+      if (nd.style.fill) sv.push(`fill: ${q(nd.style.fill)}`);
+      if (nd.style.stroke) sv.push(`stroke: ${q(nd.style.stroke)}`);
+      if (nd.style.strokeWidth) sv.push(`strokeWidth: ${nd.style.strokeWidth}`);
+      if (nd.style.textColor) sv.push(`textColor: ${q(nd.style.textColor)}`);
+      if (nd.style.dashed || nd.dash) sv.push('dashed: true');
+      if (sv.length) fields.push(`style: {${sv.join(', ')}}`);
+    }
+    if (nd.collapsed) fields.push('collapsed: true');
+    if (nd.data && Object.keys(nd.data).length) fields.push(`data: ${JSON.stringify(nd.data)}`);
     if (nd.size && (nd.size[0] !== shape.w || nd.size[1] !== shape.h)) fields.push(`size: [${nd.size[0]}, ${nd.size[1]}]`);
     if (nd.pos) fields.push(`pos: [${Math.round(nd.pos[0])}, ${Math.round(nd.pos[1])}]`);
     out.push(`  - {${fields.join(', ')}}`);
@@ -104,7 +141,7 @@ function sceneLines(d: Diagram): string[] {
   return out;
 }
 
-function signalLine(r: { name: string; type: string; period?: number; freq?: number; duty?: number; phase?: number; values: string[] }): string {
+function signalLine(r: TimingRow, indent = '  '): string {
   const fields: string[] = [`name: ${q(r.name)}`, `type: ${r.type}`];
   if (r.freq) fields.push(`freq: ${r.freq}`);
   else if (r.type === 'clock') fields.push(`period: ${r.period ?? 2}`);
@@ -115,7 +152,21 @@ function signalLine(r: { name: string; type: string; period?: number; freq?: num
     const compact = r.values.map((v) => (v === '' ? '.' : v)).join(' ');
     fields.push(`values: ${q(compact)}`);
   }
-  return `  - {${fields.join(', ')}}`;
+  if (r.type === 'bus' && r.width) fields.push(`width: ${q(r.width)}`);
+  if (r.order !== undefined) fields.push(`order: ${r.order}`);
+  if (r.color) fields.push(`color: ${q(r.color)}`);
+  // group 的子信号作为 children 内联数组，保持单行映射，避免 YAML 缩进歧义
+  if (r.type === 'group' && r.children?.length) {
+    const kids = r.children.map((c) => {
+      const cf = [`name: ${q(c.name)}`, `type: ${c.type}`];
+      if (c.values?.length) cf.push(`values: ${q(c.values.map((v) => (v === '' ? '.' : v)).join(' '))}`);
+      if (c.width) cf.push(`width: ${q(c.width)}`);
+      if (c.order !== undefined) cf.push(`order: ${c.order}`);
+      return `{${cf.join(', ')}}`;
+    });
+    fields.push(`children: [${kids.join(', ')}]`);
+  }
+  return `${indent}- {${fields.join(', ')}}`;
 }
 
 function timingLines(d: Diagram): string[] {
@@ -146,7 +197,7 @@ function timingLines(d: Diagram): string[] {
     out.push(`    steps: ${panel.steps}`);
     out.push('    signals:');
     if (!panel.rows.length) out.push('      []');
-    for (const r of panel.rows) out.push('    ' + signalLine(r));
+    for (const r of panel.rows) out.push(signalLine(r, '      '));
   }
   out.push('');
   return out;
@@ -156,23 +207,69 @@ export function serialize(d: Diagram): string {
   return [`# FPGA Diagram · ${d.kind}`, ...sceneLines(d)].join('\n');
 }
 
+/** v2 文档头：version / meta / options */
+function v2Header(file: SceneFile): string[] {
+  const out: string[] = ['# FPGA Diagram · v2.0'];
+  out.push(`version: '${file.version ?? '2.0'}'`);
+  if (file.meta && Object.keys(file.meta).length) {
+    out.push('meta:');
+    for (const k of ['title', 'author', 'created', 'modified'] as const) {
+      const v = file.meta[k];
+      if (v) out.push(`  ${k}: ${q(v)}`);
+    }
+  }
+  if (file.options && Object.keys(file.options).length) {
+    out.push('options:');
+    const o = file.options;
+    if (o.grid !== undefined) out.push(`  grid: ${o.grid}`);
+    if (o.gridSize) out.push(`  gridSize: ${o.gridSize}`);
+    if (o.snapToGrid !== undefined) out.push(`  snapToGrid: ${o.snapToGrid}`);
+    if (o.fontFamily) out.push(`  fontFamily: ${q(o.fontFamily)}`);
+    if (o.fontSize) out.push(`  fontSize: ${o.fontSize}`);
+  }
+  return out;
+}
+
 /**
  * 整份文件：只有一张图时写单图格式（保持文件干净、AI 好写）；
  * 多张图时写多视图格式（页签），互相不覆盖。
+ * v2 文档会带上 version/meta/options 头。
  */
 export function serializeFile(file: SceneFile): string {
-  if (file.scenes.length <= 1) return serialize(file.scenes[0]);
-  const out: string[] = ['# FPGA Diagram · 多视图（scenes）—— 页签切换，内容互不覆盖'];
+  const v2 = isV2(file);
+
+  // v1 且单图：维持老的单图格式，一个字节都不多写
+  if (!v2 && file.scenes.length <= 1) return serialize(file.scenes[0]);
+
+  // 多视图的 v1：老格式
+  if (!v2) {
+    const out: string[] = ['# FPGA Diagram · 多视图（scenes）—— 页签切换，内容互不覆盖'];
+    const active = Math.min(Math.max(0, file.active), file.scenes.length - 1);
+    if (active) out.push(`active: ${active}`);
+    out.push('scenes:');
+    for (const scene of file.scenes) {
+      const lines = sceneLines(scene);
+      out.push(`  # ${scene.title || scene.kind}`);
+      lines.forEach((l, i) => {
+        if (!l.trim()) return;
+        out.push(i === 0 ? `  - ${l}` : `    ${l}`);
+      });
+    }
+    out.push('');
+    return out.join('\n');
+  }
+
+  // v2：version/meta/options 头 + scenes 列表（单图也包一层，工具链统一）
+  const out = v2Header(file);
   const active = Math.min(Math.max(0, file.active), file.scenes.length - 1);
   if (active) out.push(`active: ${active}`);
   out.push('scenes:');
   for (const scene of file.scenes) {
-    const lines = sceneLines(scene);
-    const header = scene.title || scene.kind;
-    out.push(`  # ${header}`);
-    lines.forEach((l, i) => {
-      if (!l.trim()) return;
-      out.push(i === 0 ? `  - ${l}` : `    ${l}`);
+    const body = sceneLines(scene);
+    const scLines = [`id: ${q(scene.id ?? `${scene.kind}-1`)}`, ...body];
+    if (scene.title) out.push(`  # ${scene.title}`);
+    scLines.forEach((l, i) => {
+      out.push(i === 0 ? `  - ${l}` : l.trim() ? `    ${l}` : '');
     });
   }
   out.push('');

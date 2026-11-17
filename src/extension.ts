@@ -8,6 +8,7 @@ import { serializeFile } from './core/serialize';
 
 export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(FpgaEditorProvider.register(context));
+  registerDiagnostics(context);
 
   const register = (id: string, fn: (...args: any[]) => any) =>
     context.subscriptions.push(vscode.commands.registerCommand(id, fn));
@@ -15,7 +16,9 @@ export function activate(context: vscode.ExtensionContext): void {
   register('fpgaDiagram.new', async (uri?: vscode.Uri) => {
     const pick = await vscode.window.showQuickPick(
       [
-        { label: '系统框图', description: '层次框 + 子模块 + 边界信号（硬件框图）', k: 'hier' },
+        { label: '系统框图（规范）', description: 'system_block · 顶层功能模块与接口，隐藏底层原语', k: 'system_block' },
+        { label: '原理图 / 微架构', description: 'schematic · 加法器 / 寄存器 / 时钟原语', k: 'schematic' },
+        { label: '层次框图（旧格式）', description: 'block + frame · 老图纸兼容，全组件可见', k: 'hier' },
         { label: '流程图', description: '模块按数据流从左到右串联，坐标自动排', k: 'block' },
         { label: '状态机', description: 'fsm · 状态 / 转移 / 条件', k: 'fsm' },
         { label: '时序波形', description: 'timing · 时钟 / 信号 / 总线', k: 'timing' },
@@ -27,6 +30,8 @@ export function activate(context: vscode.ExtensionContext): void {
     await newDiagram((pick as any).k as string, uri);
   });
 
+  register('fpgaDiagram.newSystem', (uri?: vscode.Uri) => newDiagram('system_block', uri));
+  register('fpgaDiagram.newSchematic', (uri?: vscode.Uri) => newDiagram('schematic', uri));
   register('fpgaDiagram.newBlock', (uri?: vscode.Uri) => newDiagram('hier', uri));
   register('fpgaDiagram.newFlow', (uri?: vscode.Uri) => newDiagram('block', uri));
   register('fpgaDiagram.newFsm', (uri?: vscode.Uri) => newDiagram('fsm', uri));
@@ -50,6 +55,36 @@ export function activate(context: vscode.ExtensionContext): void {
   registerLmTool(context);
 }
 
+/** 把解析诊断同步到 Problems 面板；webview 保存走 applyEdit，会自然触发刷新 */
+function registerDiagnostics(context: vscode.ExtensionContext): void {
+  const collection = vscode.languages.createDiagnosticCollection('fpgad');
+  context.subscriptions.push(collection);
+
+  const refresh = (doc: vscode.TextDocument) => {
+    if (doc.languageId !== 'fpgad') return;
+    const { diagnostics } = parseFile(doc.getText());
+    collection.set(
+      doc.uri,
+      diagnostics.map((d) => {
+        const line = Math.max(0, Math.min(doc.lineCount - 1, (d.line ?? 1) - 1));
+        const range = new vscode.Range(line, 0, line, 0);
+        const severity = d.severity === 'error' ? vscode.DiagnosticSeverity.Error : vscode.DiagnosticSeverity.Warning;
+        const item = new vscode.Diagnostic(range, d.message, severity);
+        item.source = 'FPGA Diagram';
+        return item;
+      }),
+    );
+  };
+
+  context.subscriptions.push(
+    vscode.workspace.onDidOpenTextDocument(refresh),
+    vscode.workspace.onDidChangeTextDocument((e) => refresh(e.document)),
+    vscode.workspace.onDidSaveTextDocument(refresh),
+    vscode.workspace.onDidCloseTextDocument((doc) => collection.delete(doc.uri)),
+  );
+  for (const doc of vscode.workspace.textDocuments) refresh(doc);
+}
+
 async function newDiagram(template: string, hint?: vscode.Uri): Promise<void> {
   const dir = hint ?? vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(os.homedir());
   const defaultUri = vscode.Uri.joinPath(dir, `${sampleTitle(template)}.fpgad`);
@@ -70,6 +105,8 @@ async function ensureSampleFolder(): Promise<vscode.Uri> {
   const folder = vscode.Uri.joinPath(root, 'fpga-samples');
   await vscode.workspace.fs.createDirectory(folder);
   const files: [string, string][] = [
+    ['system_block', 'soc-top.fpgad'],
+    ['schematic', 'datapath.fpgad'],
     ['hier', 'soc-wdg.fpgad'],
     ['block', 'block-flow.fpgad'],
     ['fsm', 'fsm-sample.fpgad'],

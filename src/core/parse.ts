@@ -11,7 +11,11 @@ import {
   Side,
   TimingPanel,
   TimingRow,
+  LOW_LEVEL_TYPES,
   emptyDiagram,
+  isLowLevelType,
+  normalizeDir,
+  resolveKind,
   resolveType,
   shapeOf,
   syncClockFreqs,
@@ -175,23 +179,32 @@ function normSide(v: unknown, fallback: Side = 'l'): Side {
 /** 解析 "l:clk,vs,hs | r:dout" / ["clk","rst"] / {left:[...],right:[...]} */
 function normPorts(raw: unknown, diags: Diagnostic[]): Port[] {
   const out: Port[] = [];
-  // 端口名后缀表示方向：`clk` 默认按边推断，`data>` 出框，`bus<>` 双向
-  const push = (name: string, side: Side) => {
+  // 端口名后缀表示方向：`clk` 默认按边推断，`data>` 出框，`bus<>` 双向；
+  // 对象写法 {name, dir: input|output|inout} 显式指定，优先级更高
+  const push = (name: string, side: Side, explicitDir?: Port['dir'], explicitWidth?: string) => {
     let nm = name.trim();
-    let dir: Port['dir'];
-    if (nm.endsWith('<>')) {
+    let dir: Port['dir'] | undefined = explicitDir;
+    if (!dir && nm.endsWith('<>')) {
       dir = 'both';
       nm = nm.slice(0, -2).trim();
-    } else if (nm.endsWith('>')) {
+    } else if (!dir && nm.endsWith('>')) {
       dir = 'out';
       nm = nm.slice(0, -1).trim();
-    } else if (nm.endsWith('<')) {
+    } else if (!dir && nm.endsWith('<')) {
       dir = 'in';
       nm = nm.slice(0, -1).trim();
     }
+    // 位宽：显式 width 优先；否则从端口名末尾的 [19:0] / [7] 自动提取，
+    // 并从显示名里剥掉，避免位宽在框上重复画一遍。
+    let width = explicitWidth?.trim() || undefined;
+    const wm = nm.match(/^(.+?)\[(\d+:\d+|\d+)\]$/);
+    if (wm) {
+      nm = wm[1].trim();
+      width = width ?? wm[2];
+    }
     if (!nm) return;
     if (out.some((p) => p.name === nm)) return;
-    out.push({ id: nm, name: nm, side, ...(dir ? { dir } : {}) });
+    out.push({ id: nm, name: nm, side, ...(dir ? { dir } : {}), ...(width ? { width } : {}) });
   };
 
   if (typeof raw === 'string') {
@@ -214,7 +227,12 @@ function normPorts(raw: unknown, diags: Diagnostic[]): Port[] {
         else push(item, 'l');
       } else if (item && typeof item === 'object') {
         const o = item as Record<string, unknown>;
-        push(asString(o.name) ?? asString(o.id) ?? '', normSide(o.side));
+        push(
+          asString(o.name) ?? asString(o.id) ?? '',
+          normSide(o.side),
+          normalizeDir(o.dir ?? o.direction),
+          asString(o.width) ?? asString(o.bits),
+        );
       }
     }
     return out;
@@ -293,6 +311,37 @@ function parseEdgeLabel(raw: string): { label?: string; style?: EdgeStyle; route
   const text = keep.join(' ').trim();
   if (!text || text === '""' || text === "''") return { style, route };
   return { label: text, style, route };
+}
+
+/** v2: 解析手工拐点 [[x,y], ...]，支持对象 {x,y} 写法 */
+function normWaypoints(raw: unknown): [number, number][] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const pts: [number, number][] = [];
+  for (const p of raw) {
+    if (Array.isArray(p) && p.length >= 2) {
+      const x = Number(p[0]);
+      const y = Number(p[1]);
+      if (Number.isFinite(x) && Number.isFinite(y)) pts.push([x, y]);
+    } else if (p && typeof p === 'object') {
+      const o = p as Record<string, unknown>;
+      const x = Number(o.x);
+      const y = Number(o.y);
+      if (Number.isFinite(x) && Number.isFinite(y)) pts.push([x, y]);
+    }
+  }
+  return pts.length ? pts : undefined;
+}
+
+/** v2: 解析连线视觉覆盖 {stroke, strokeWidth, dashed, color} */
+function normEdgeVisual(raw: unknown): DiagramEdge['visual'] | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const o = raw as Record<string, unknown>;
+  const v: NonNullable<DiagramEdge['visual']> = {};
+  if (asString(o.stroke)) v.stroke = asString(o.stroke);
+  if (asString(o.color)) v.color = asString(o.color);
+  if (Number(o.strokeWidth) > 0) v.strokeWidth = Number(o.strokeWidth);
+  if (o.dashed === true) v.dashed = true;
+  return Object.keys(v).length ? v : undefined;
 }
 
 function parseEdgeString(raw: string): Partial<DiagramEdge> | null {
@@ -382,6 +431,8 @@ function makeRow(o: Record<string, any>, diags: Diagnostic[]): TimingRow | null 
     values: normValues(o.values ?? o.value ?? o.wave),
     color: normColor(o.color ?? o.colour, name, diags),
   };
+  if (asString(o.width) || asString(o.bits)) row.width = (asString(o.width) ?? asString(o.bits)) as string;
+  if (o.order !== undefined && Number.isFinite(Number(o.order))) row.order = Number(o.order);
   if (row.type === 'clock') {
     const freq = Number(o.freq ?? o.mhz ?? o.frequency ?? 0) || 0;
     if (freq > 0) row.freq = freq;
@@ -390,7 +441,20 @@ function makeRow(o: Record<string, any>, diags: Diagnostic[]): TimingRow | null 
     row.phase = Number(o.phase ?? 0) || 0;
     row.values = [];
   }
-  if (row.type === 'group') row.values = [];
+  if (row.type === 'group') {
+    row.values = [];
+    // v2: group 的子信号递归解析
+    const rawKids = o.children ?? o.signals;
+    if (Array.isArray(rawKids)) {
+      const kids: TimingRow[] = [];
+      for (const k of rawKids) {
+        if (!k || typeof k !== 'object') continue;
+        const kid = makeRow(k as Record<string, any>, diags);
+        if (kid) kids.push(kid);
+      }
+      if (kids.length) row.children = kids;
+    }
+  }
   return row;
 }
 
@@ -434,16 +498,23 @@ function parseTiming(d: Record<string, any>, diagram: Diagram, diags: Diagnostic
 
 /** 把一个已 load 的 YAML 映射解析成一张图 */
 function parseSceneObject(d: Record<string, any>, hintKind: Kind | undefined, diags: Diagnostic[], idx: LineIndex): Diagram {
-  let kind: Kind =
-    d.kind === 'fsm' || d.kind === 'timing' || d.kind === 'block'
-      ? d.kind
-      : d.states
-        ? 'fsm'
-        : d.signals || d.panels
-          ? 'timing'
-          : hintKind ?? 'block';
-  if (d.kind && !['block', 'fsm', 'timing'].includes(String(d.kind))) {
-    diags.push({ severity: 'warning', message: `未知 kind "${d.kind}"，按 ${kind} 处理（可选 block / fsm / timing）` });
+  // diagram_type 是新增的顶层绘图类型声明；旧文件只有 kind，也继续认。
+  // 两者都没有时按内容推断，保持老图纸的兼容行为。
+  const typeRaw = d.diagram_type ?? d.diagramType ?? d.kind;
+  const declared = resolveKind(typeRaw);
+  const kind: Kind =
+    declared ??
+    (d.states
+      ? 'fsm'
+      : d.signals || d.panels
+        ? 'timing'
+        : hintKind ?? 'block');
+  if (typeRaw && !declared) {
+    diags.push({
+      severity: 'warning',
+      message: `未知绘图类型 "${typeRaw}"，按 ${kind} 处理（可选 block / system_block / schematic / fsm / timing）`,
+      line: idx.key('diagram_type') ?? idx.key('kind'),
+    });
   }
   const diagram = emptyDiagram(kind);
   diagram.kind = kind;
@@ -451,10 +522,20 @@ function parseSceneObject(d: Record<string, any>, hintKind: Kind | undefined, di
   diagram.title = asString(d.title);
 
   const opt = (d.options ?? {}) as Record<string, any>;
-  const dir = String(opt.direction ?? d.direction ?? 'LR').toUpperCase();
-  diagram.options.direction = dir === 'TB' || dir === 'TD' ? 'TB' : 'LR';
-  const lay = String(opt.layout ?? d.layout ?? 'auto');
-  diagram.options.layout = ['auto', 'layered', 'circular', 'manual'].includes(lay) ? (lay as any) : 'auto';
+  // v2: layout 可以是对象 {strategy, direction, nodeSpacing, layerSpacing}；旧写法是字符串
+  let layoutObj: Record<string, any> = {};
+  if (d.layout && typeof d.layout === 'object' && !Array.isArray(d.layout)) layoutObj = d.layout as Record<string, any>;
+  const dir = String(layoutObj.direction ?? opt.direction ?? d.direction ?? 'LR').toUpperCase();
+  diagram.options.direction =
+    dir === 'TB' || dir === 'TD' ? 'TB' : dir === 'RL' ? 'RL' : dir === 'BT' ? 'BT' : 'LR';
+  const lay = String(layoutObj.strategy ?? layoutObj.layout ?? opt.strategy ?? opt.layout ?? (typeof d.layout === 'string' ? d.layout : 'auto'));
+  diagram.options.layout = (['auto', 'layered', 'circular', 'grid', 'manual', 'sugiyama', 'force'].includes(lay)
+    ? lay
+    : 'auto') as typeof diagram.options.layout;
+  if (Number(layoutObj.nodeSpacing) > 0) diagram.options.nodeSpacing = Number(layoutObj.nodeSpacing);
+  else if (Number(opt.nodeSpacing) > 0) diagram.options.nodeSpacing = Number(opt.nodeSpacing);
+  if (Number(layoutObj.layerSpacing) > 0) diagram.options.layerSpacing = Number(layoutObj.layerSpacing);
+  else if (Number(opt.layerSpacing) > 0) diagram.options.layerSpacing = Number(opt.layerSpacing);
   const tick = Number(d.tick ?? d.tickNs ?? 0) || 0;
   if (tick > 0) diagram.tick = tick;
 
@@ -466,12 +547,23 @@ function parseSceneObject(d: Record<string, any>, hintKind: Kind | undefined, di
 
   // ---- nodes ----
   const rawNodes = d.nodes ?? d.states ?? d.modules ?? [];
+  const pushNode = (line: number | undefined, rawId: string, o: Record<string, any>) => {
+    const node = makeNode(rawId, kind, o, diags);
+    if (kind === 'system_block' && isLowLevelType(node.type)) {
+      diags.push({
+        severity: 'warning',
+        message: `[规范提示] ${LOW_LEVEL_TYPES[node.type]}属于底层原理图组件，不建议在系统框图中使用`,
+        line,
+      });
+    }
+    diagram.nodes.push(node);
+  };
   if (!Array.isArray(rawNodes)) {
     diags.push({ severity: 'error', message: 'nodes 必须是列表' });
   } else {
     for (const item of rawNodes) {
       if (typeof item === 'string') {
-        diagram.nodes.push(makeNode(item, kind, {}, diags));
+        pushNode(idx.at(item), item, {});
         continue;
       }
       if (!item || typeof item !== 'object') {
@@ -490,7 +582,7 @@ function parseSceneObject(d: Record<string, any>, hintKind: Kind | undefined, di
         diags.push({ severity: 'error', message: `节点 id 重复："${id}"，后者已忽略`, line: idLine });
         continue;
       }
-      diagram.nodes.push(makeNode(id, kind, o, diags));
+      pushNode(idLine, id, o);
     }
   }
 
@@ -528,14 +620,19 @@ function parseSceneObject(d: Record<string, any>, hintKind: Kind | undefined, di
         } else {
           const from = typeof o.from === 'string' ? splitEndpoint(o.from) : { node: asString(o.from?.node) ?? asString(o.source) ?? '', port: asString(o.from?.port) ?? asString(o.from_port), side: o.from?.side };
           const to = typeof o.to === 'string' ? splitEndpoint(o.to) : { node: asString(o.to?.node) ?? asString(o.target) ?? '', port: asString(o.to?.port) ?? asString(o.to_port), side: o.to?.side };
+          // style 旧写法是字符串（wire/bus/...），v2 是视觉对象；两者可同时出现
+          const edgeStyle = typeof o.style === 'string' ? (STYLE_WORDS[o.style.toLowerCase()] ?? 'wire') : 'wire';
+          const visual = normEdgeVisual(typeof o.style === 'object' ? o.style : o.visual);
           partial = {
             from: { node: from.node, port: from.port, side: (from as any).side ? normSide((from as any).side) : undefined },
             to: { node: to.node, port: to.port, side: (to as any).side ? normSide((to as any).side) : undefined },
             label: asString(o.label) ?? asString(o.text),
             action: asString(o.action),
-            style: (STYLE_WORDS[String(o.style ?? '').toLowerCase()] ?? 'wire') as EdgeStyle,
+            style: edgeStyle as EdgeStyle,
             route: (ROUTE_WORDS[String(o.route ?? '').toLowerCase()] ?? 'orth') as EdgeRoute,
             arrow: o.arrow === 'both' ? 'both' : o.arrow === 'none' ? 'none' : 'end',
+            ...(normWaypoints(o.waypoints) ? { waypoints: normWaypoints(o.waypoints) } : {}),
+            ...(visual ? { visual } : {}),
           };
         }
       }
@@ -567,6 +664,8 @@ function parseSceneObject(d: Record<string, any>, hintKind: Kind | undefined, di
         style: partial.style ?? 'wire',
         route: partial.route ?? 'orth',
         arrow: partial.arrow ?? 'end',
+        ...(partial.waypoints ? { waypoints: partial.waypoints } : {}),
+        ...(partial.visual ? { visual: partial.visual } : {}),
       });
     });
   }
@@ -578,7 +677,7 @@ function parseSceneObject(d: Record<string, any>, hintKind: Kind | undefined, di
 }
 
 /**
- * 解析整份文件：单图文件（kind: block/fsm/timing）或多视图文件（scenes: [...]）。
+ * 解析整份文件：单图文件（diagram_type / kind）或多视图文件（scenes: [...]）。
  * 多视图让"框图 / 状态机 / 多组时序"共存在同一个 .fpgad 里，切换页签不丢内容。
  */
 export function parseFile(text: string, hintKind?: Kind): ParseFileResult {
@@ -603,6 +702,34 @@ export function parseFile(text: string, hintKind?: Kind): ParseFileResult {
   const d = doc as Record<string, any>;
   // 用未 trim 的原文建索引，否则开头的空行会把所有行号整体偏移
   const idx = buildLineIndex(text);
+
+  // v2 文档头：version / meta / options（都是可选，缺了就是 v1 形态）
+  const version = asString(d.version);
+  const metaRaw = d.meta && typeof d.meta === 'object' ? (d.meta as Record<string, any>) : undefined;
+  const meta = metaRaw
+    ? {
+        ...(asString(metaRaw.title) ? { title: asString(metaRaw.title) } : {}),
+        ...(asString(metaRaw.author) ? { author: asString(metaRaw.author) } : {}),
+        ...(asString(metaRaw.created) ? { created: asString(metaRaw.created) } : {}),
+        ...(asString(metaRaw.modified) ? { modified: asString(metaRaw.modified) } : {}),
+      }
+    : undefined;
+  const goptRaw = d.options && typeof d.options === 'object' ? (d.options as Record<string, any>) : undefined;
+  const gopt = goptRaw
+    ? {
+        ...(goptRaw.grid !== undefined ? { grid: !!goptRaw.grid } : {}),
+        ...(Number(goptRaw.gridSize) > 0 ? { gridSize: Number(goptRaw.gridSize) } : {}),
+        ...(goptRaw.snapToGrid !== undefined ? { snapToGrid: !!goptRaw.snapToGrid } : {}),
+        ...(asString(goptRaw.fontFamily) ? { fontFamily: asString(goptRaw.fontFamily) } : {}),
+        ...(Number(goptRaw.fontSize) > 0 ? { fontSize: Number(goptRaw.fontSize) } : {}),
+      }
+    : undefined;
+  const header = {
+    ...(version ? { version } : {}),
+    ...(meta && Object.keys(meta).length ? { meta } : {}),
+    ...(gopt && Object.keys(gopt).length ? { options: gopt } : {}),
+  };
+
   if (Array.isArray(d.scenes)) {
     const scenes: Diagram[] = [];
     d.scenes.forEach((s: any, i: number) => {
@@ -620,11 +747,11 @@ export function parseFile(text: string, hintKind?: Kind): ParseFileResult {
     }
     let active = Number(d.active ?? 0) || 0;
     if (active < 0 || active >= scenes.length) active = 0;
-    return { file: { scenes, active }, diagnostics };
+    return { file: { scenes, active, ...header }, diagnostics };
   }
 
   const scene = parseSceneObject(d, hintKind, diagnostics, idx);
-  return { file: { scenes: [scene], active: 0 }, diagnostics };
+  return { file: { scenes: [scene], active: 0, ...header }, diagnostics };
 }
 
 /** 兼容接口：只取当前激活的那张图 */
@@ -650,6 +777,20 @@ function makeNode(id: string, kind: Kind, o: Record<string, any>, diags: Diagnos
   }
   const children = Array.isArray(o.children) ? o.children.map((c: unknown) => asString(c) ?? '') : undefined;
   const frameStyle = String(o.style ?? o.frame ?? '').toLowerCase();
+  // v2: style 可以是对象 {fill, stroke, dashed, ...}；旧写法 style: dashed 仍认
+  let style: DiagramNode['style'] | undefined;
+  if (o.style && typeof o.style === 'object' && !Array.isArray(o.style)) {
+    const so = o.style as Record<string, unknown>;
+    style = {
+      ...(asString(so.fill) ? { fill: asString(so.fill) } : {}),
+      ...(asString(so.stroke) ? { stroke: asString(so.stroke) } : {}),
+      ...(Number(so.strokeWidth) > 0 ? { strokeWidth: Number(so.strokeWidth) } : {}),
+      ...(asString(so.textColor) ? { textColor: asString(so.textColor) } : {}),
+      ...(so.dashed === true ? { dashed: true } : {}),
+    };
+    if (!Object.keys(style).length) style = undefined;
+  }
+  const dashed = o.dash === true || frameStyle === 'dashed' || style?.dashed === true;
   return {
     id,
     type,
@@ -663,9 +804,12 @@ function makeNode(id: string, kind: Kind, o: Record<string, any>, diags: Diagnos
     size: [w, h],
     ports: normPorts(o.ports ?? o.io, diags),
     children: children?.filter(Boolean),
-    ...(o.dash === true || frameStyle === 'dashed' ? { dash: true } : {}),
+    ...(dashed ? { dash: true } : {}),
     ...(String(o.titlePos ?? o.titlepos ?? '').toLowerCase() === 'br' || String(o.titlePos ?? '').toLowerCase() === 'bottom'
       ? { titlePos: 'br' as const }
       : {}),
+    ...(style ? { style } : {}),
+    ...(o.collapsed === true ? { collapsed: true } : {}),
+    ...(o.data && typeof o.data === 'object' ? { data: o.data as Record<string, unknown> } : {}),
   };
 }

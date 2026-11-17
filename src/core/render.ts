@@ -18,6 +18,8 @@ export interface RenderOptions {
   labelBoxes?: { x: number; y: number; w: number; h: number }[];
   /** 时序图里被选中的信号行 */
   selRow?: { panel: number; row: number } | null;
+  /** 选中边时绘制拐点编辑手柄（waypoint 编辑态） */
+  waypointHandles?: boolean;
 }
 
 export interface RenderResult {
@@ -527,6 +529,10 @@ export function edgeMidpoint(d: Diagram, e: DiagramEdge): Pt | null {
   }
   const pair = resolveEdge(d, e);
   if (!pair) return null;
+  if (e.waypoints?.length) {
+    const pts: Pt[] = [{ x: pair.a.x, y: pair.a.y }, ...e.waypoints.map((w) => ({ x: w[0], y: w[1] })), { x: pair.b.x, y: pair.b.y }];
+    return midOfPath(pts).p;
+  }
   const route = effectiveRoute(d, e);
   if (route === 'straight') return { x: (pair.a.x + pair.b.x) / 2, y: (pair.a.y + pair.b.y) / 2 };
   if (route === 'curve') return { x: (pair.a.x + pair.b.x) / 2, y: (pair.a.y + pair.b.y) / 2 };
@@ -763,15 +769,16 @@ function edgeSvg(d: Diagram, e: DiagramEdge, p: Palette, opt: RenderOptions): st
   const sel = !!opt.selEdges?.includes(e.id);
   const route = effectiveRoute(d, e);
   const hot = opt.dropEdge === e.id;
-  const color = sel || hot ? p.accent : edgeColor(p, e.style);
-  const width = hot ? 3 : e.style === 'bus' ? 2.4 : e.style === 'clock' ? 1.6 : 1.5;
+  const color = sel || hot ? p.accent : e.visual?.stroke || e.visual?.color || edgeColor(p, e.style);
+  const width = hot ? 3 : e.visual?.strokeWidth ?? (e.style === 'bus' ? 2.4 : e.style === 'clock' ? 1.6 : 1.5);
   const marker = `arw-${sel || hot ? 'accent' : e.style}`;
-  const dash = e.style === 'ctrl' ? ' stroke-dasharray="6 4"' : '';
+  const dash = e.visual?.dashed || e.style === 'ctrl' ? ' stroke-dasharray="6 4"' : '';
 
   let dPath = '';
   let mid: { p: Pt; dir: Pt } | null = null;
   let fixed = false;
   let laneOffset = 0;
+  let pathPts: Pt[] = [];
 
   if (e.from.node === e.to.node) {
     const node = d.nodes.find((x) => x.id === e.from.node)!;
@@ -802,9 +809,16 @@ function edgeSvg(d: Diagram, e: DiagramEdge, p: Palette, opt: RenderOptions): st
     laneOffset = laneCount > 1 ? (laneIndex - (laneCount - 1) / 2) * 20 : 0;
     const flip = e.from.node > e.to.node ? -1 : 1;
 
-    if (route === 'straight') {
+    if (e.waypoints?.length) {
+      // v2 手工拐点：折线依次经过每个拐点，不再自动路由
+      const pts: Pt[] = [{ x: a.x, y: a.y }, ...e.waypoints.map((w) => ({ x: w[0], y: w[1] })), { x: b.x, y: b.y }];
+      dPath = roundPath(pts);
+      mid = midOfPath(pts);
+      pathPts = pts;
+    } else     if (route === 'straight') {
       dPath = `M${n(a.x)},${n(a.y)} L${n(b.x)},${n(b.y)}`;
       mid = { p: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, dir: { x: dx / len, y: dy / len } };
+      pathPts = [{ x: a.x, y: a.y }, { x: b.x, y: b.y }];
     } else if (route === 'curve') {
       const da = outDir(a.side);
       const db = outDir(b.side);
@@ -830,6 +844,7 @@ function edgeSvg(d: Diagram, e: DiagramEdge, p: Palette, opt: RenderOptions): st
       const pts = routePoints(d, a, b, lane, new Set([e.from.node, e.to.node]));
       dPath = roundPath(pts);
       mid = midOfPath(pts);
+      pathPts = pts;
     }
   }
 
@@ -855,6 +870,27 @@ function edgeSvg(d: Diagram, e: DiagramEdge, p: Palette, opt: RenderOptions): st
       `<text x="${n(at.x)}" y="${n(ly + 11)}" text-anchor="middle" font-family="${FONT}" font-size="10.5" fill="${sel ? p.accent : p.textDim}">${esc(labelText)}</text>`,
     );
   }
+  // 拐点编辑手柄：仅选中单条边且开启编辑态时显示
+  const waypointEditable = route === 'straight' || !!e.waypoints?.length;
+  if (opt.waypointHandles && sel && opt.interactive && pathPts.length >= 2 && waypointEditable) {
+    const handles: string[] = [];
+    // 已有拐点（跳过首尾端点）
+    for (let i = 1; i < pathPts.length - 1; i++) {
+      const pt = pathPts[i];
+      if (i - 1 < (e.waypoints?.length ?? 0)) {
+        handles.push(
+          `<circle cx="${n(pt.x)}" cy="${n(pt.y)}" r="5" fill="${p.bg}" stroke="${p.accent}" stroke-width="2" data-waypoint="${esc(e.id)}:${i - 1}" class="fd-waypoint"/>`,
+        );
+      }
+    }
+    // 路径中点的"加拐点"按钮
+    const midPt = midOfPath(pathPts).p;
+    handles.push(
+      `<circle cx="${n(midPt.x)}" cy="${n(midPt.y)}" r="6" fill="${p.accent}" fill-opacity="0.85" stroke="${p.bg}" stroke-width="1.5" data-waypoint-add="${esc(e.id)}" class="fd-waypoint-add"/>`,
+    );
+    out.push(...handles);
+  }
+
   const cls = `fd-edge-g${hot ? ' fd-edge-drop' : ''}`;
   const dataAttrG = opt.interactive ? ` data-edge="${esc(e.id)}"` : '';
   return `<g class="${cls}"${dataAttrG}>${out.join('')}</g>`;
@@ -1219,4 +1255,89 @@ export function svgDocument(
     body +
     `</svg>`
   );
+}
+
+/**
+ * 增量渲染缓存（设计稿 4.x 的 diffUpdate 思路，取低风险实现）：
+ * 用 scene 的内容签名做 key，签名不变时直接复用上一次的 SVG，跳过 layout + 渲染。
+ * - 签名基于"影响画面的语义字段"，忽略运行时坐标 x/y（它们由 layout 推导）。
+ * - 缓存命中时 scene 已带着上次 layout 后的坐标，画布不会错位。
+ * - LRU 上限避免多视图来回切换时无限增长。
+ */
+export class RenderCache {
+  private map = new Map<string, RenderResult>();
+  private limit: number;
+
+  constructor(limit = 12) {
+    this.limit = limit;
+  }
+
+  /** 由内容算签名；选择状态单独传入，保证选中/高亮变化时也重绘 */
+  static signature(d: Diagram, opt?: RenderOptions): string {
+    const core = {
+      kind: d.kind,
+      title: d.title,
+      options: d.options,
+      tick: d.tick,
+      nodes: d.nodes.map((nd) => ({
+        id: nd.id,
+        type: nd.type,
+        label: nd.label,
+        sub: nd.sub,
+        pos: nd.pos,
+        size: nd.size,
+        ports: nd.ports,
+        children: nd.children,
+        dash: nd.dash,
+        titlePos: nd.titlePos,
+        collapsed: nd.collapsed,
+        style: nd.style,
+      })),
+      edges: d.edges.map((e) => ({
+        from: e.from,
+        to: e.to,
+        label: e.label,
+        action: e.action,
+        style: e.style,
+        route: e.route,
+        arrow: e.arrow,
+        waypoints: e.waypoints,
+        visual: e.visual,
+      })),
+      panels: d.panels,
+      selection: opt?.selection,
+      selEdges: opt?.selEdges,
+      selRow: opt?.selRow,
+      anchorsOn: opt?.anchorsOn,
+      dropEdge: opt?.dropEdge,
+      handles: opt?.handles,
+      interactive: opt?.interactive,
+      waypointHandles: opt?.waypointHandles,
+      theme: opt?.theme,
+    };
+    return JSON.stringify(core);
+  }
+
+  /** 命中缓存直接返回，否则渲染并缓存 */
+  render(d: Diagram, opt: RenderOptions): RenderResult {
+    const key = RenderCache.signature(d, opt);
+    const hit = this.map.get(key);
+    if (hit) {
+      // LRU：命中后移到队尾
+      this.map.delete(key);
+      this.map.set(key, hit);
+      return hit;
+    }
+    const result = render(d, opt);
+    this.map.set(key, result);
+    if (this.map.size > this.limit) {
+      const oldest = this.map.keys().next().value;
+      if (oldest !== undefined) this.map.delete(oldest);
+    }
+    return result;
+  }
+
+  clear(): void {
+    this.map.clear();
+  }
 }

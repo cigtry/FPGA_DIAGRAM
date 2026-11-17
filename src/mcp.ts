@@ -19,11 +19,11 @@ const TOOLS = [
   {
     name: 'fpga_diagram_render',
     description:
-      '把 FPGA Diagram DSL（YAML 子集）渲染为 SVG 或 .fpgad 文件。kind 支持 block（系统框图）、fsm（状态机）、timing（时序波形）。坐标自动布局，不需要手写位置。',
+      '把 FPGA Diagram DSL（YAML 子集）渲染为 SVG 或 .fpgad 文件。顶层声明 diagram_type: system_block（顶层系统框图）/ schematic（底层原理图）/ datapath（数据通路）/ fsm / timing，旧文件 kind: block|fsm|timing 继续兼容。文件头写 version: \'2.0\' 启用 v2 文档模型（meta/options、节点 style、连线 waypoints、端口 width）。system_block 里写加法器、寄存器、时钟原语会收到规范提示。坐标自动布局，不需要手写位置。',
     inputSchema: {
       type: 'object',
       properties: {
-        spec: { type: 'string', description: '完整的 DSL 文本，第一行形如 kind: block' },
+        spec: { type: 'string', description: '完整的 DSL 文本，第一行形如 diagram_type: system_block 或 kind: block' },
         output: { type: 'string', description: '输出文件路径（.svg 或 .fpgad）。省略则写入系统临时目录' },
         format: { type: 'string', enum: ['svg', 'fpgad'], description: '输出格式，默认由 output 扩展名推断，否则 svg' },
         theme: { type: 'string', enum: ['light', 'dark'], description: 'SVG 配色，默认 light' },
@@ -46,7 +46,7 @@ const TOOLS = [
     description: '返回某种图表的完整 DSL 示例，可作为生成时的格式模板。',
     inputSchema: {
       type: 'object',
-      properties: { kind: { type: 'string', enum: ['block', 'fsm', 'timing'] } },
+      properties: { kind: { type: 'string', enum: ['system_block', 'schematic', 'datapath', 'block', 'hier', 'fsm', 'timing', 'multi'] } },
       required: ['kind'],
     },
   },
@@ -70,8 +70,8 @@ function text(t: string, isError = false): Json {
 
 function callTool(name: string, args: Json): Json {
   if (name === 'fpga_diagram_example') {
-    const kind = args?.kind === 'fsm' || args?.kind === 'timing' ? args.kind : 'block';
-    return text(sample(kind));
+    const kind = String(args?.kind ?? '').toLowerCase();
+    return text(sample(kind || 'block'));
   }
 
   const spec = String(args?.spec ?? '');

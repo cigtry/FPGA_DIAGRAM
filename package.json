@@ -2,7 +2,7 @@
   "name": "fpga-diagram",
   "displayName": "FPGA Diagram",
   "description": "AI 友好的 FPGA 图表工具：系统框图 / 状态机 / 多组时序波形。一个文件多视图，文本即图形。",
-  "version": "0.2.1",
+  "version": "2.0.0",
   "publisher": "fpga-tools",
   "license": "MIT",
   "repository": {
@@ -78,6 +78,16 @@
         "category": "FPGA 图表"
       },
       {
+        "command": "fpgaDiagram.newSystem",
+        "title": "新建系统框图（规范）",
+        "category": "FPGA 图表"
+      },
+      {
+        "command": "fpgaDiagram.newSchematic",
+        "title": "新建原理图 / 微架构",
+        "category": "FPGA 图表"
+      },
+      {
         "command": "fpgaDiagram.newBlock",
         "title": "新建系统框图（层次）",
         "category": "FPGA 图表"
@@ -119,13 +129,13 @@
           "fpga",
           "visualization"
         ],
-        "modelDescription": "把一段 FPGA Diagram DSL（YAML 子集）渲染成 .fpgad 图表文件并在编辑器中打开。支持 three kinds：block（系统框图/流程图）、fsm（状态机）、timing（时序波形，可含多组 panels 与多时钟 freq）。也支持 scenes 多视图：一个文件装多张图。当你需要画 FPGA 框图、状态机、时序波形时调用此工具。spec 必须是完整的 DSL 文本。",
+        "modelDescription": "把一段 FPGA Diagram DSL（YAML 子集）渲染成 .fpgad 图表文件并在编辑器中打开。支持六种视图：system_block（顶层系统框图，只放功能模块/接口/层次框）、schematic（底层原理图，开放寄存器/加法器/乘法器/时钟原语）、datapath（数据通路，同 schematic）、block（旧格式兼容）、fsm（状态机）、timing（时序波形，可含多组 panels 与多时钟 freq）。顶层用 diagram_type 声明新类型，旧文件继续用 kind。支持 scenes 多视图：一个文件装多张图；节点端口可写 input/output/inout，也可用右侧面板插入 AXI4-Lite/Stream/Full 信号组。需要画 FPGA 框图、微架构、状态机、时序波形时调用此工具。文件头写 version: '2.0' 可用 v2 文档模型（meta/options/节点样式/连线拐点/端口位宽）。spec 必须是完整的 DSL 文本。",
         "inputSchema": {
           "type": "object",
           "properties": {
             "spec": {
               "type": "string",
-              "description": "完整的 FPGA Diagram DSL 文本（YAML 子集），以 kind: block|fsm|timing 或 scenes: 开头"
+              "description": "完整的 FPGA Diagram DSL 文本（YAML 子集），以 version: '2.0'、diagram_type: system_block|schematic|datapath、kind: block|fsm|timing 或 scenes: 开头"
             },
             "filename": {
               "type": "string",

@@ -1,5 +1,46 @@
 # Changelog
 
+## 2.0.0
+
+按 v2.0 设计稿做**架构级重构**：引入文档模型、命令模式、布局策略与增量渲染，
+同时完整保留 0.2.x 已验证的能力（多视图、多时钟、AXI 信号组、Problems 诊断、语法高亮）。
+旧 `.fpgad` 文件不写 `version` 就走 v1 格式，存盘不会被迫升级。
+
+### 数据模型（v2）
+
+- 新增 `FPGADocument` 文档头：`version` / `meta`（title/author/created/modified）/ `options`（grid/gridSize/snapToGrid/fontFamily/fontSize）
+- `Scene` 增加 `id` 与 `layout` 对象（`strategy` / `direction` / `nodeSpacing` / `layerSpacing`）
+- 节点：新增 `style`（fill/stroke/strokeWidth/textColor/dashed）、`collapsed`、`data`
+- 端口：新增 `width`（`[19:0]` 自动提取，也能写 `width: 32`）；方向支持 `input/output/inout`
+- 连线：新增 `waypoints` 手工拐点与 `visual` 视觉覆盖（stroke/strokeWidth/dashed/color）
+- 时序信号：新增 `width` / `order` / `children`（group 子信号递归）
+- 新增 `datapath`（数据通路）类型，组件表与 `schematic` 一致
+
+### DSL 双向兼容
+
+- `parseFile` / `serializeFile` 同时支持 v1 与 v2；只有显式 `version: '2.0'` 才输出 v2 文档头
+- v1 单图/多视图文件往返字节级稳定（回归覆盖 7 个示例）
+
+### 架构
+
+- **命令模式**：`CommandStore` 替换原来散落的 `JSON.stringify(snapshot)`，支持连续拖拽合并、批量事务、
+  可读的撤销/重做标签；undo/redo 栈有上限且完全可序列化
+- **交互状态机**：`InteractionManager` 显式化 IDLE/SELECTING/DRAGGING/LINKING/RESIZING/
+  REORDERING/WAYPOINT/PAINTING/PANNING/PALACING，非法转移被拒、光标随状态切换
+- **布局策略化**：`auto/layered/circular/grid/manual/sugiyama/force`，方向支持 `LR/TB/RL/BT`
+- **增量渲染**：`RenderCache` 按内容签名缓存 SVG，内容未变时跳过 layout + 渲染
+
+### 交互
+
+- 拐点编辑：选中直线或带拐点的连线，点中点黄色圆点插入拐点，拖白色圆点调整，右键删除；属性面板可清除全部拐点
+- 时序信号拖拽重排：左侧信号列表可直接拖拽上下移动（保留原「上移/下移」按钮）
+- 新连线默认直线（0.2.x 已引入）在 v2 中继续生效，旧图纸不受影响
+
+### 质量
+
+- 单元测试从 36 → 67：新增 v2 解析/序列化往返、CommandStore、交互状态机、布局策略、waypoints 渲染、RenderCache
+- 无头交互回归累计 67 项全 PASS（主回归 28 / undo 8 / 系统框图 18 / 错误保护 13）
+
 ## 0.2.1
 
 ### 修复

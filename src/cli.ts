@@ -6,7 +6,7 @@ import { render, svgDocument } from './core/render';
 import { palette, ThemeName } from './core/theme';
 import { serializeFile } from './core/serialize';
 import { sample } from './core/examples';
-import { KIND_LABEL, Kind, timingSummary } from './core/model';
+import { KIND_LABEL, Kind, resolveKind, timingSummary } from './core/model';
 
 interface Opts {
   out?: string;
@@ -111,7 +111,7 @@ function cmdValidate(file: string | undefined, o: Opts) {
     );
   } else {
     printDiagnostics(diagnostics);
-    const lines = doc.scenes.map((s, i) => `  ${i === doc.active ? '*' : ' '} ${i + 1}. ${s.title || KIND_LABEL[s.kind]}（${s.kind === 'block' ? '框图' : s.kind}）：${detailOf(s)}`);
+    const lines = doc.scenes.map((s, i) => `  ${i === doc.active ? '*' : ' '} ${i + 1}. ${s.title || KIND_LABEL[s.kind]}（${KIND_LABEL[s.kind]}）：${detailOf(s)}`);
     const head = doc.scenes.length > 1 ? `${doc.scenes.length} 个视图` : detailOf(doc.scenes[doc.active]);
     if (errors) process.stderr.write(`✖ 校验失败：${head}\n${lines.join('\n')}\n`);
     else process.stdout.write(`✔ 校验通过：${head}\n${doc.scenes.length > 1 ? lines.join('\n') + '\n' : ''}`);
@@ -129,8 +129,9 @@ function cmdFmt(file: string | undefined, o: Opts) {
 }
 
 function cmdNew(kind: string | undefined, o: Opts) {
-  const k: Kind = kind === 'fsm' || kind === 'timing' ? kind : 'block';
-  const text = sample(kind === 'multi' ? 'multi' : k);
+  const requested = String(kind ?? '').toLowerCase();
+  const k: Kind = resolveKind(requested) ?? 'block';
+  const text = sample(requested === 'multi' ? 'multi' : requested === 'hier' ? 'hier' : k);
   if (o.out) writeFileSync(o.out, text, 'utf8');
   else process.stdout.write(text);
 }
@@ -144,7 +145,7 @@ function help() {
       '  fpga-diagram render <file.fpgad> [-o out.svg] [--theme dark|light] [--scale 2]',
       '  fpga-diagram validate <file.fpgad> [--json]',
       '  fpga-diagram fmt <file.fpgad> [-o out.fpgad]',
-      '  fpga-diagram new block|fsm|timing|multi [-o out.fpgad]',
+      '  fpga-diagram new system_block|schematic|datapath|block|hier|fsm|timing|multi [-o out.fpgad]',
       '  fpga-diagram mcp                 # 以 MCP server 方式启动（stdio）',
       '',
       '提示：文件参数写 - 表示从 stdin 读入。',

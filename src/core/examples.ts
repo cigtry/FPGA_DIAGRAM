@@ -140,15 +140,65 @@ scenes:
           - {name: dma_data, type: bus, values: ". . . B0 B1 B2 B3 z . . . . . . . ."}
 `;
 
-/** 模板名：block（流程图）· hier（层次框图）· fsm · timing · multi（多视图） */
+export const SYSTEM_SAMPLE = `# FPGA Diagram · 系统框图（顶层）
+# system_block 只放功能模块 / 接口 / 层次框；底层原语请另建 schematic 视图
+# 端口后缀：< 输入，> 输出，<> 双向；也可在右侧 IO 面板里可视化增删
+diagram_type: system_block
+title: SoC 顶层框图
+
+nodes:
+  - {id: top, type: frame, label: SoC, size: [620, 300], ports: "l: s_axi_aclk<, s_axi_aresetn<, s_axi_awaddr[19:0]<> | r: irq>"}
+  - {id: axi, type: module, label: AXI4-Lite, sub: 寄存器配置, ports: "l: s_axi_aclk< | r: reg_write>"}
+  - {id: core, type: module, label: 处理核心, ports: "l: reg_write< | r: data_valid>"}
+  - {id: dma, type: module, label: DMA, ports: "l: data_valid< | r: m_axi_tdata>"}
+  - {id: out, type: io, label: 对外接口}
+
+edges:
+  - top.s_axi_aclk -> axi.s_axi_aclk : straight
+  - axi.reg_write -> core.reg_write : straight
+  - core.data_valid -> dma.data_valid : straight
+  - dma.m_axi_tdata -> out : straight
+`;
+
+export const SCHEMATIC_SAMPLE = `# FPGA Diagram · 原理图 / 微架构
+# schematic 开放寄存器、加法器、乘法器、选择器、时钟等底层组件
+diagram_type: schematic
+title: 数据通路微架构
+
+nodes:
+  - {id: din, type: io, label: 数据输入}
+  - {id: r0, type: reg, label: 输入寄存}
+  - {id: mul, type: mult, label: 乘法器, sub: 16×16}
+  - {id: mux, type: mux, label: 结果选择}
+  - {id: add, type: adder, label: 累加}
+  - {id: clk, type: clock, label: PLL, sub: 100MHz}
+  - {id: dout, type: io, label: 数据输出}
+
+edges:
+  - din -> r0 : straight
+  - r0 -> mul : straight
+  - mul -> mux : straight
+  - add -> mux : straight
+  - mux -> dout : straight
+  - clk -> r0 : clock
+  - clk -> add : clock
+`;
+
+/** 模板名：system_block（系统框图）· schematic（原理图）· block（流程图）· hier（层次框图）· fsm · timing · multi */
 export function sample(name: string): string {
   if (name === 'multi') return MULTI_SAMPLE;
   if (name === 'hier') return HIER_SAMPLE;
+  if (name === 'system_block') return SYSTEM_SAMPLE;
+  if (name === 'schematic') return SCHEMATIC_SAMPLE;
+  if (name === 'datapath') return SCHEMATIC_SAMPLE.replace('diagram_type: schematic', 'diagram_type: datapath');
   return name === 'fsm' ? FSM_SAMPLE : name === 'timing' ? TIMING_SAMPLE : BLOCK_SAMPLE;
 }
 
 export function sampleTitle(name: string): string {
   if (name === 'multi') return 'FPGA 采集系统';
   if (name === 'hier') return 'SoC_WDG';
+  if (name === 'system_block') return 'SoC 顶层框图';
+  if (name === 'schematic') return '数据通路微架构';
+  if (name === 'datapath') return '数据通路';
   return name === 'fsm' ? 'DDR 突发读控制器' : name === 'timing' ? 'AXI 写通道时序' : '图像缩放流水线';
 }

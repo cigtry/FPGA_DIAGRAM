@@ -1,0 +1,22 @@
+# FPGA Diagram · 原理图 / 微架构
+# schematic 开放寄存器、加法器、乘法器、选择器、时钟等底层组件
+diagram_type: schematic
+title: 数据通路微架构
+
+nodes:
+  - {id: din, type: io, label: 数据输入}
+  - {id: r0, type: reg, label: 输入寄存}
+  - {id: mul, type: mult, label: 乘法器, sub: 16×16}
+  - {id: mux, type: mux, label: 结果选择}
+  - {id: add, type: adder, label: 累加}
+  - {id: clk, type: clock, label: PLL, sub: 100MHz}
+  - {id: dout, type: io, label: 数据输出}
+
+edges:
+  - din -> r0 : straight
+  - r0 -> mul : straight
+  - mul -> mux : straight
+  - add -> mux : straight
+  - mux -> dout : straight
+  - clk -> r0 : clock
+  - clk -> add : clock
