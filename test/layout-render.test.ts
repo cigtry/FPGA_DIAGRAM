@@ -130,3 +130,60 @@ describe('RenderCache 增量渲染', () => {
     assert.notStrictEqual(r1, r2);
   });
 });
+
+describe('显式尺寸（拖边框缩放后不被布局吃掉）', () => {
+  it('文件里写了 size 的节点，布局后宽高完全保持', () => {
+    const d = diagram(`kind: block
+nodes:
+  - {id: tall, type: module, label: 高模块, size: [200, 400], pos: [0, 0]}
+`);
+    layout(d);
+    assert.deepEqual([d.nodes[0].w, d.nodes[0].h], [200, 400], '400 高不应被截成 220');
+  });
+
+  it('缩窄到比文字更窄时也保持用户尺寸', () => {
+    const d = diagram(`kind: block
+nodes:
+  - {id: n, type: module, label: 一个很长的模块名字用于测试, size: [90, 60], pos: [0, 0]}
+`);
+    layout(d);
+    assert.deepEqual([d.nodes[0].w, d.nodes[0].h], [90, 60]);
+  });
+
+  it('没有显式 size 的节点仍按文字自适应', () => {
+    const d = diagram(`kind: block
+nodes:
+  - {id: n, type: module, label: 一个很长的模块名字用于测试自适应宽度}
+`);
+    const nd = d.nodes[0];
+    assert.equal(nd.size, undefined, '没写 size 时不应被当成固定尺寸');
+    layout(d);
+    assert.ok(nd.w > 130, '长文字应把节点撑宽');
+  });
+
+  it('拖过尺寸的分组框不会被内容撑回', () => {
+    const d = diagram(`kind: block
+nodes:
+  - {id: g, type: group, label: 分组, size: [500, 400], pos: [100, 100], children: [a]}
+  - {id: a, type: module, label: A, pos: [140, 140]}
+`);
+    layout(d);
+    const g = d.nodes.find((n) => n.id === 'g')!;
+    assert.deepEqual([g.w, g.h, g.x, g.y], [500, 400, 100, 100]);
+  });
+
+  it('尺寸写进文件后能原样解析回来', () => {
+    const d = diagram(`kind: block
+nodes:
+  - {id: n, type: module, label: N, size: [240, 300], pos: [10, 20]}
+`);
+    layout(d);
+    const back = diagram(`kind: block
+nodes:
+  - {id: n, type: module, label: N, size: [240, 300], pos: [10, 20]}
+`);
+    layout(back);
+    assert.deepEqual([back.nodes[0].w, back.nodes[0].h], [240, 300]);
+    assert.deepEqual(back.nodes[0].size, [240, 300]);
+  });
+});

@@ -1,4 +1,4 @@
-import { Diagram, DiagramEdge, DiagramNode, EdgeRoute, Side, TimingPanel } from './model';
+import { Diagram, DiagramEdge, DiagramNode, EdgeRoute, Port, Side, TimingPanel, TimingRow, numText, portLabel, tickOf, timingStats, widthSuffix } from './model';
 import { Palette, edgeColor } from './theme';
 import { FONT, MONO, esc, measure, n, wrap } from './text';
 import { layout } from './layout';
@@ -12,6 +12,8 @@ export interface RenderOptions {
   padding?: number;
   /** 画布模式：带命中属性，便于交互 */
   interactive?: boolean;
+  /** 画布缩放比例：手柄与边框命中带按它反向换算，保证屏幕上的可点尺寸稳定 */
+  zoom?: number;
   /** 拖放时高亮的连线（插入落点提示） */
   dropEdge?: string;
   /** 内部用：已放好的标签矩形，后续标签避让它们 */
@@ -118,7 +120,7 @@ function contentBounds(d: Diagram): { x: number; y: number; w: number; h: number
     let right = nd.x + nd.w;
     if (nd.type === 'frame') {
       for (const port of nd.ports) {
-        const span = measure(port.name, 9.5) + 34;
+        const span = measure(portLabel(port), 9.5) + 34;
         if (port.side === 'l') left = Math.min(left, nd.x - span);
         else if (port.side === 'r') right = Math.max(right, nd.x + nd.w + span);
         else if (port.side === 't') y0 = Math.min(y0, nd.y - span);
@@ -330,12 +332,18 @@ function nodeSvg(d: Diagram, nd: DiagramNode, p: Palette, opt: RenderOptions): s
     }
   }
 
-  if (nd.type !== 'group' && nd.type !== 'frame') body.push(portMarks(nd, p, opt));
+  // 选中并显示手柄时，端口点要画在边框命中带之上，否则从引脚拉线会被当成拖边框
+  const portsSvg = nd.type !== 'group' && nd.type !== 'frame' ? portMarks(nd, p, opt) : '';
+  if (!(sel && opt.handles)) body.push(portsSvg);
 
   let overlay = '';
   if (sel) {
     overlay += `<rect x="${n(x - 5)}" y="${n(y - 5)}" width="${n(w + 10)}" height="${n(h + 10)}" rx="7" fill="none" stroke="${p.accent}" stroke-width="1" stroke-dasharray="4 3" opacity="0.85"/>`;
-    if (opt.handles) overlay += handles(nd, p);
+    if (opt.handles) {
+      overlay += resizeBands(nd, opt);
+      overlay += handles(nd, p, opt);
+      overlay += portsSvg;
+    }
   }
 
   return `<g${hit}>${hitRect}${body.join('')}${overlay}</g>`;
@@ -353,30 +361,64 @@ function portMarks(nd: DiagramNode, p: Palette, opt: RenderOptions): string {
     const anchor = isLeft ? 'start' : port.side === 'r' ? 'end' : 'middle';
     const ty = port.side === 't' ? a.y + 12 : port.side === 'b' ? a.y - 6 : a.y + 3.5;
     out.push(
-      `<text x="${n(tx)}" y="${n(ty)}" text-anchor="${anchor}" font-family="${MONO}" font-size="9.5" fill="${p.textDim}">${esc(port.name)}</text>`,
+      `<text x="${n(tx)}" y="${n(ty)}" text-anchor="${anchor}" font-family="${MONO}" font-size="9.5" fill="${p.textDim}">${esc(portLabel(port))}</text>`,
     );
   }
   return out.join('');
 }
 
-function handles(nd: DiagramNode, p: Palette): string {
-  const s = 4.5;
+function handles(nd: DiagramNode, p: Palette, opt: RenderOptions): string {
+  const z = Math.min(4, Math.max(0.2, opt.zoom ?? 1));
+  // 反向补偿画布缩放：屏幕上始终是约 9~10px 的小方块，缩到 30% 也点得中
+  const s = Math.min(12, Math.max(1.2, 4.6 / z));
+  const sw = Math.min(2.6, Math.max(0.5, 1.4 / z));
+  const box = resizeBox(nd);
   const pts: [string, number, number][] = [
-    ['nw', nd.x, nd.y],
-    ['n', nd.x + nd.w / 2, nd.y],
-    ['ne', nd.x + nd.w, nd.y],
-    ['e', nd.x + nd.w, nd.y + nd.h / 2],
-    ['se', nd.x + nd.w, nd.y + nd.h],
-    ['s', nd.x + nd.w / 2, nd.y + nd.h],
-    ['sw', nd.x, nd.y + nd.h],
-    ['w', nd.x, nd.y + nd.h / 2],
+    ['nw', box.x, box.y],
+    ['n', box.x + box.w / 2, box.y],
+    ['ne', box.x + box.w, box.y],
+    ['e', box.x + box.w, box.y + box.h / 2],
+    ['se', box.x + box.w, box.y + box.h],
+    ['s', box.x + box.w / 2, box.y + box.h],
+    ['sw', box.x, box.y + box.h],
+    ['w', box.x, box.y + box.h / 2],
   ];
   return pts
     .map(
       ([h, x, y]) =>
-        `<rect data-handle="${h}" x="${n(x - s)}" y="${n(y - s)}" width="${n(s * 2)}" height="${n(s * 2)}" fill="${p.bg}" stroke="${p.accent}" stroke-width="1.4" class="fd-handle"/>`,
+        `<rect data-handle="${h}" x="${n(x - s)}" y="${n(y - s)}" width="${n(s * 2)}" height="${n(s * 2)}" fill="${p.bg}" stroke="${p.accent}" stroke-width="${sw}" class="fd-handle"/>`,
     )
     .join('');
+}
+
+/**
+ * 缩放参考框：分组框顶部留了 16px 标题栏，真正可拖的边从标题栏下面开始。
+ * 手柄和边框命中带都按这个框算，视觉边界才和可拖边界一致。
+ */
+function resizeBox(nd: DiagramNode): { x: number; y: number; w: number; h: number } {
+  if (nd.type === 'group') {
+    return { x: nd.x, y: nd.y + 16, w: nd.w, h: Math.max(12, nd.h - 16) };
+  }
+  return { x: nd.x, y: nd.y, w: nd.w, h: nd.h };
+}
+
+/**
+ * 四边命中带：选中后直接拖边框就能改宽高，不必非得抓到角落的小方块。
+ * 宽度按缩放反向补偿，并限制在短边的 40% 内，避免小节点整块都被边带吃掉。
+ */
+function resizeBands(nd: DiagramNode, opt: RenderOptions): string {
+  const box = resizeBox(nd);
+  const z = Math.min(4, Math.max(0.2, opt.zoom ?? 1));
+  const bw = Math.max(6, Math.min(26, 13 / z, Math.min(box.w, box.h) * 0.4));
+  const half = bw / 2;
+  const rect = (dir: string, x: number, y: number, w: number, h: number) =>
+    `<rect data-handle="${dir}" x="${n(x)}" y="${n(y)}" width="${n(w)}" height="${n(h)}" class="fd-handle fd-band"/>`;
+  return [
+    rect('n', box.x, box.y - half, box.w, bw),
+    rect('s', box.x, box.y + box.h - half, box.w, bw),
+    rect('w', box.x - half, box.y, bw, box.h),
+    rect('e', box.x + box.w - half, box.y, bw, box.h),
+  ].join('');
 }
 
 function anchorDots(nd: DiagramNode, p: Palette, opt: RenderOptions): string {
@@ -395,7 +437,8 @@ function anchorDots(nd: DiagramNode, p: Palette, opt: RenderOptions): string {
 function groupSvg(nd: DiagramNode, p: Palette, opt: RenderOptions): string {
   const sel = !!opt.selection?.includes(nd.id);
   const hit = opt.interactive ? ` data-node="${esc(nd.id)}" class="fd-node"` : '';
-  const handlesSvg = sel && opt.handles ? handles(nd, p) : '';
+  const handlesSvg =
+    sel && opt.handles ? resizeBands(nd, opt) + handles(nd, p, opt) : '';
   return `<g${hit}><rect x="${n(nd.x)}" y="${n(nd.y + 16)}" width="${n(nd.w)}" height="${n(nd.h - 16)}" rx="8" fill="${p.band}" fill-opacity="0.55" stroke="${sel ? p.accent : p.groupStroke}" stroke-width="${sel ? 1.8 : 1.1}" stroke-dasharray="6 4"/><text x="${n(nd.x + 10)}" y="${n(nd.y + 11)}" font-family="${FONT}" font-size="11.5" fill="${p.textDim}">${esc(nd.label)}</text>${handlesSvg}</g>`;
 }
 
@@ -443,7 +486,7 @@ function frameSvg(d: Diagram, nd: DiagramNode, p: Palette, opt: RenderOptions): 
   }
 
   out.push(framePorts(nd, p, opt));
-  if (sel && opt.handles) out.push(handles(nd, p));
+  if (sel && opt.handles) out.push(resizeBands(nd, opt), handles(nd, p, opt));
   void d;
   return `<g>${out.join('')}</g>`;
 }
@@ -489,7 +532,7 @@ function framePorts(nd: DiagramNode, p: Palette, opt: RenderOptions): string {
       anchor = 'middle';
     }
     out.push(
-      `<text x="${n(tx)}" y="${n(ty)}" text-anchor="${anchor}" font-family="${MONO}" font-size="9.5" fill="${p.textDim}"${tag}>${esc(port.name)}</text>`,
+      `<text x="${n(tx)}" y="${n(ty)}" text-anchor="${anchor}" font-family="${MONO}" font-size="9.5" fill="${p.textDim}"${tag}>${esc(portLabel(port))}</text>`,
     );
   }
   return out.join('');
@@ -497,11 +540,25 @@ function framePorts(nd: DiagramNode, p: Palette, opt: RenderOptions): string {
 
 // ---------------------------------------------------------------- edges
 
+/** 按名字（允许带位宽后缀，如 `awaddr[19:0]`）查找端口 */
+export function findPort(nd: DiagramNode, ref?: string): Port | undefined {
+  if (!ref) return undefined;
+  const norm = (s: string) => s.replace(/\s+/g, '');
+  const want = norm(ref);
+  return nd.ports.find((p) => norm(p.name) === want || (!!p.width && norm(`${p.name}[${p.width}]`) === want));
+}
+
+/** 端口声明的所在边；找不到返回 undefined */
+export function portSideOf(nd: DiagramNode, ref?: string): Side | undefined {
+  return findPort(nd, ref)?.side;
+}
+
 export function portAnchor(nd: DiagramNode, side: Side, portName?: string): Anchor {
   const ports = nd.ports.filter((x) => x.side === side);
   let t = 0.5;
   if (ports.length) {
-    const idx = portName ? ports.findIndex((x) => x.name === portName) : -1;
+    const target = findPort(nd, portName);
+    const idx = target && target.side === side ? ports.findIndex((x) => x.id === target.id || x.name === target.name) : -1;
     t = idx >= 0 ? (idx + 1) / (ports.length + 1) : 0.5;
   }
   switch (side) {
@@ -535,8 +592,10 @@ export function resolveEdge(d: Diagram, e: DiagramEdge): { a: Anchor; b: Anchor 
   const from = d.nodes.find((x) => x.id === e.from.node);
   const to = d.nodes.find((x) => x.id === e.to.node);
   if (!from || !to) return null;
-  const aSide = e.from.side ?? autoSide(from, to);
-  const bSide = e.to.side ?? autoSide(to, from);
+  // 端点声明了端口时，优先用端口所在的边：`src.dout -> dst.sin` 里
+  // dout 在右边就该从右边出，不能按两节点相对位置猜成左边。
+  const aSide = e.from.side ?? portSideOf(from, e.from.port) ?? autoSide(from, to);
+  const bSide = e.to.side ?? portSideOf(to, e.to.port) ?? autoSide(to, from);
   return { a: portAnchor(from, aSide, e.from.port), b: portAnchor(to, bSide, e.to.port) };
 }
 
@@ -615,7 +674,7 @@ function pathScore(pts: Pt[], d: Diagram, skip: Set<string>): number {
 }
 
 /** 生成若干条候选正交路径，挑一条不穿过其他节点、且最短的 */
-function routePoints(d: Diagram, a: Anchor, b: Anchor, lane: number, skip: Set<string>): Pt[] {
+function routePoints(d: Diagram, a: Anchor, b: Anchor, lane: number, skip: Set<string>, avoidEnds = false): Pt[] {
   const stub = 20;
   const da = outDir(a.side);
   const db = outDir(b.side);
@@ -625,7 +684,10 @@ function routePoints(d: Diagram, a: Anchor, b: Anchor, lane: number, skip: Set<s
   const bh = b.side === 'l' || b.side === 'r';
   const cands: Pt[][] = [];
 
-  if (ah && bh) {
+  if (avoidEnds) {
+    // 端口声明和几何打架时，直连/中间折线一定会穿过起点或终点节点，
+    // 直接只用"从外侧兜一圈"的候选，并且把端点节点也算进碰撞检测。
+  } else if (ah && bh) {
     const mx = (p1.x + p2.x) / 2 + lane * 18;
     cands.push([{ x: a.x, y: a.y }, p1, { x: mx, y: p1.y }, { x: mx, y: p2.y }, p2, { x: b.x, y: b.y }]);
     const my = (p1.y + p2.y) / 2 + lane * 18;
@@ -659,7 +721,7 @@ function routePoints(d: Diagram, a: Anchor, b: Anchor, lane: number, skip: Set<s
   let bestScore = Infinity;
   for (const c of cands) {
     const pts = dedupe(c);
-    const sc = pathScore(pts, d, skip);
+    const sc = pathScore(pts, d, avoidEnds ? new Set<string>() : skip);
     if (sc < bestScore) {
       bestScore = sc;
       best = pts;
@@ -786,7 +848,7 @@ function effectiveRoute(d: Diagram, e: DiagramEdge): EdgeRoute {
 
 function edgeSvg(d: Diagram, e: DiagramEdge, p: Palette, opt: RenderOptions): string {
   const sel = !!opt.selEdges?.includes(e.id);
-  const route = effectiveRoute(d, e);
+  let route = effectiveRoute(d, e);
   const hot = opt.dropEdge === e.id;
   const color = sel || hot ? p.accent : e.visual?.stroke || e.visual?.color || edgeColor(p, e.style);
   const width = hot ? 3 : e.visual?.strokeWidth ?? (e.style === 'bus' ? 2.4 : e.style === 'clock' ? 1.6 : 1.5);
@@ -798,6 +860,7 @@ function edgeSvg(d: Diagram, e: DiagramEdge, p: Palette, opt: RenderOptions): st
   let fixed = false;
   let laneOffset = 0;
   let pathPts: Pt[] = [];
+  let avoidEnds = false;
 
   if (e.from.node === e.to.node) {
     const node = d.nodes.find((x) => x.id === e.from.node)!;
@@ -812,6 +875,17 @@ function edgeSvg(d: Diagram, e: DiagramEdge, p: Palette, opt: RenderOptions): st
     const dx = b.x - a.x;
     const dy = b.y - a.y;
     const len = Math.hypot(dx, dy) || 1;
+    // 端口声明和几何打架时（比如两端都朝右、或目标在端口背后），
+    // 直线会从节点内部穿过去。这里改走正交绕行，而不是偷偷换一条边——
+    // 换边会把电气语义画错，绕行至少端口还是对的。
+    const da0 = outDir(a.side);
+    const db0 = outDir(b.side);
+    const backA = da0.x * dx + da0.y * dy < -1;
+    const backB = db0.x * -dx + db0.y * -dy < -1;
+    if (backA || backB) {
+      avoidEnds = true;
+      if (route === 'straight') route = 'orth';
+    }
     // 同一对节点之间的多条边要分道，否则正反两个方向会完全重合
     const siblings = d.edges.filter(
       (o) => (o.from.node === e.from.node && o.to.node === e.to.node) || (o.from.node === e.to.node && o.to.node === e.from.node),
@@ -834,10 +908,24 @@ function edgeSvg(d: Diagram, e: DiagramEdge, p: Palette, opt: RenderOptions): st
       dPath = roundPath(pts);
       mid = midOfPath(pts);
       pathPts = pts;
-    } else     if (route === 'straight') {
-      dPath = `M${n(a.x)},${n(a.y)} L${n(b.x)},${n(b.y)}`;
-      mid = { p: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, dir: { x: dx / len, y: dy / len } };
-      pathPts = [{ x: a.x, y: a.y }, { x: b.x, y: b.y }];
+    } else if (route === 'straight') {
+      if (laneOffset) {
+        // 同一对节点之间的多条直线：用二次曲线把中间顶开，
+        // 否则正反两条会完全重合，看起来像一根双头箭头。
+        const nx = (-dy / len) * flip;
+        const ny = (dx / len) * flip;
+        const mx = (a.x + b.x) / 2 + nx * laneOffset;
+        const my = (a.y + b.y) / 2 + ny * laneOffset;
+        const cx = (a.x + b.x) / 2 + nx * laneOffset * 2;
+        const cy = (a.y + b.y) / 2 + ny * laneOffset * 2;
+        dPath = `M${n(a.x)},${n(a.y)} Q${n(cx)},${n(cy)} ${n(b.x)},${n(b.y)}`;
+        mid = { p: { x: mx, y: my }, dir: { x: dx / len, y: dy / len } };
+        pathPts = [{ x: a.x, y: a.y }, { x: mx, y: my }, { x: b.x, y: b.y }];
+      } else {
+        dPath = `M${n(a.x)},${n(a.y)} L${n(b.x)},${n(b.y)}`;
+        mid = { p: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, dir: { x: dx / len, y: dy / len } };
+        pathPts = [{ x: a.x, y: a.y }, { x: b.x, y: b.y }];
+      }
     } else if (route === 'curve') {
       const da = outDir(a.side);
       const db = outDir(b.side);
@@ -860,7 +948,7 @@ function edgeSvg(d: Diagram, e: DiagramEdge, p: Palette, opt: RenderOptions): st
       }
     } else {
       const lane = laneCount > 1 ? laneIndex : 0;
-      const pts = routePoints(d, a, b, lane, new Set([e.from.node, e.to.node]));
+      const pts = routePoints(d, a, b, lane, new Set([e.from.node, e.to.node]), avoidEnds);
       dPath = roundPath(pts);
       mid = midOfPath(pts);
       pathPts = pts;
@@ -923,7 +1011,7 @@ export const AXIS_H = 26;
 export const PANEL_TITLE_H = 26;
 export const PANEL_GAP = 20;
 
-/** 每拍像素宽 */
+/** 每格像素宽 */
 export function stepW(_d?: Diagram): number {
   return 34;
 }
@@ -937,8 +1025,17 @@ export function timingWidth(d: Diagram): number {
   return LABEL_W + widest * stepW(d) + 16;
 }
 
+/** 一行占几条视觉行：分组标题 + 它的子信号 */
+export function rowSpan(r: TimingRow): number {
+  return 1 + (r.type === 'group' ? (r.children?.length ?? 0) : 0);
+}
+
+export function rowsHeight(rows: TimingRow[]): number {
+  return rows.reduce((s, r) => s + rowSpan(r), 0);
+}
+
 export function panelHeight(p: TimingPanel): number {
-  return (p.title ? PANEL_TITLE_H : 0) + p.rows.length * ROW_H + AXIS_H + 6;
+  return (p.title ? PANEL_TITLE_H : 0) + rowsHeight(p.rows) * ROW_H + AXIS_H + 6;
 }
 
 export function timingHeight(d: Diagram): number {
@@ -946,9 +1043,44 @@ export function timingHeight(d: Diagram): number {
   return d.panels.reduce((s, p) => s + panelHeight(p), 0) + Math.max(0, d.panels.length - 1) * PANEL_GAP;
 }
 
-/** 时间基准：每拍多少 ns */
-export function tickOf(d: Diagram): number {
-  return d.tick && d.tick > 0 ? d.tick : 10;
+/** 时间基准：每格多少 ns（用户 tick 优先，否则用最快时钟推导值） */
+export { tickOf };
+
+/**
+ * 组标题右上角的时间摘要。
+ *
+ * 「拍」= 一个时钟周期（组里没时钟时 = 一格），所以三个数必须满足
+ * `拍数 × 每拍 ns = 总时长 ns`，且总时长 = 格数 × 网格 ns。
+ * 例如 100 MHz（10 ns/周期）+ tick 5 + 16 格 → `8 拍 · 80 ns · 10 ns/拍 · 网格 5 ns`。
+ */
+export function timingCaption(d: Diagram, panel: TimingPanel, level: 'full' | 'compact' | 'min' = 'full'): string {
+  const st = timingStats(d, panel);
+  const head = `${numText(st.beats, 1)} 拍 · ${numText(st.spanNs)} ns`;
+  if (level === 'min') return head;
+  const withBeat = `${head} · ${numText(st.beatNs, 3)} ns/拍`;
+  // 网格比一拍更细时把分辨率也报出来，否则"5 ns/拍"和格线对不上
+  const finer = st.hasClock && Math.abs(st.beatNs - st.tick) > 1e-9;
+  if (level === 'compact' || !finer) return withBeat;
+  return `${withBeat} · 网格 ${numText(st.tick)} ns`;
+}
+
+/**
+ * 主网格间距（单位：格）。
+ * 有时钟时按"一个时钟周期几格"来加密主网格，让计数拍和竖线对齐；
+ * 没有时钟、或每周期格数离谱（<2 或 >8）时退回每 4 格一条。
+ */
+export function majorEvery(d: Diagram, panel: TimingPanel): number {
+  const cpb = timingStats(d, panel).cellsPerBeat;
+  const r = Math.round(cpb);
+  if (Math.abs(cpb - r) < 1e-6 && r >= 2 && r <= 8) return r;
+  return 4;
+}
+
+/** 时间轴刻度间距（单位：格）：始终是主网格的整数倍，且标签不超过 12 个 */
+export function labelEvery(d: Diagram, panel: TimingPanel): number {
+  let every = Math.max(1, majorEvery(d, panel));
+  while (panel.steps / every > 12 && every < panel.steps) every *= 2;
+  return every;
 }
 
 function timingBody(d: Diagram, p: Palette, opt: RenderOptions): string {
@@ -962,6 +1094,11 @@ function timingBody(d: Diagram, p: Palette, opt: RenderOptions): string {
     y += panelHeight(panel) + PANEL_GAP;
   });
   return out.join('');
+}
+
+/** 时序行左侧名字：总线带位宽，和端口记法保持一致 */
+function rowTitle(r: TimingRow): string {
+  return `${r.name}${r.type === 'bus' ? widthSuffix(r.width) : ''}`;
 }
 
 function panelBody(
@@ -982,42 +1119,50 @@ function panelBody(
     out.push(
       `<text x="2" y="17" font-family="${FONT}" font-size="12" font-weight="600" fill="${p.text}">${esc(panel.title)}</text>`,
     );
-    const label = `${panel.steps} 拍 · ${Math.round(panel.steps * tick)} ns · ${tick} ns/拍`;
-    out.push(
-      `<text x="${n(total)}" y="17" text-anchor="end" font-family="${MONO}" font-size="10" fill="${p.textDim}">${esc(label)}</text>`,
-    );
+    // 组很窄时逐级缩短摘要，宁可少报网格也不压到左边的组名上
+    const titleW = measure(panel.title, 12);
+    let label = timingCaption(d, panel);
+    for (const lv of ['compact', 'min'] as const) {
+      if (measure(label, 10) + titleW + 24 <= total - 2) break;
+      label = timingCaption(d, panel, lv);
+    }
+    if (measure(label, 10) + titleW + 12 <= total - 2) {
+      out.push(
+        `<text x="${n(total)}" y="17" text-anchor="end" font-family="${MONO}" font-size="10" fill="${p.textDim}">${esc(label)}</text>`,
+      );
+    }
   } else if (pi > 0) {
     // 无标题的第二组：画一条分隔线，避免看成同一组
     out.push(`<line x1="0" y1="2" x2="${n(total)}" y2="2" stroke="${p.gridMajor}" stroke-width="1" stroke-dasharray="5 4"/>`);
   }
 
   const top0 = titleH;
-  const height = panel.rows.length * ROW_H;
+  const height = rowsHeight(panel.rows) * ROW_H;
 
-  // 竖向网格
+  // 竖向网格：主网格落在时钟沿（一个周期 = N 格）上，计数拍才和竖线对齐
+  const major = majorEvery(d, panel);
   for (let i = 0; i <= panel.steps; i++) {
     const x = x0 + i * sw;
-    const major = i % 4 === 0;
+    const isMajor = i % major === 0;
     out.push(
-      `<line x1="${n(x)}" y1="${n(top0)}" x2="${n(x)}" y2="${n(top0 + height)}" stroke="${major ? p.gridMajor : p.grid}" stroke-width="1"/>`,
+      `<line x1="${n(x)}" y1="${n(top0)}" x2="${n(x)}" y2="${n(top0 + height)}" stroke="${isMajor ? p.gridMajor : p.grid}" stroke-width="1"/>`,
     );
   }
 
-  panel.rows.forEach((row, i) => {
-    const y = top0 + i * ROW_H;
-    if (opt.selRow && opt.selRow.panel === pi && opt.selRow.row === i) {
+  const drawRow = (row: TimingRow, y: number, indent: number, topIndex: number | null): void => {
+    if (topIndex !== null && opt.selRow && opt.selRow.panel === pi && opt.selRow.row === topIndex) {
       out.push(`<rect x="0" y="${n(y)}" width="${n(total)}" height="${n(ROW_H)}" fill="${p.accent}" fill-opacity="0.08"/>`);
     }
     out.push(`<line x1="0" y1="${n(y + ROW_H)}" x2="${n(total)}" y2="${n(y + ROW_H)}" stroke="${p.grid}" stroke-width="1"/>`);
     if (row.type === 'group') {
       out.push(`<rect x="0" y="${n(y)}" width="${n(total)}" height="${n(ROW_H)}" fill="${p.band}"/>`);
       out.push(
-        `<text x="10" y="${n(y + ROW_H / 2 + 4)}" font-family="${FONT}" font-size="11.5" font-weight="500" fill="${p.text}">${esc(row.name)}</text>`,
+        `<text x="${n(10 + indent)}" y="${n(y + ROW_H / 2 + 4)}" font-family="${FONT}" font-size="11.5" font-weight="500" fill="${p.text}">${esc(row.name)}</text>`,
       );
       return;
     }
     out.push(
-      `<text x="10" y="${n(y + ROW_H / 2 + 4)}" font-family="${MONO}" font-size="11.5" fill="${p.text}">${esc(row.name)}</text>`,
+      `<text x="${n(10 + indent)}" y="${n(y + ROW_H / 2 + 4)}" font-family="${MONO}" font-size="${indent ? 10.5 : 11.5}" fill="${p.text}">${esc(rowTitle(row))}</text>`,
     );
     if (row.type === 'clock' && row.freq) {
       out.push(
@@ -1029,20 +1174,33 @@ function panelBody(
     const mid = (top + bot) / 2;
 
     if (row.type === 'clock') {
-      out.push(clockPath(row, x0, sw, panel.steps, top, bot, p, row.color));
+      out.push(clockPath(row, x0, sw, panel.steps, top, bot, p, row.color, tick));
     } else if (row.type === 'bus') {
       out.push(busBody(row, x0, sw, panel.steps, top, bot, p, row.color));
     } else {
       out.push(logicBody(row, x0, sw, panel.steps, top, bot, mid, p, row.color));
     }
 
-    if (opt.interactive) {
+    if (opt.interactive && topIndex !== null) {
       for (let c = 0; c < panel.steps; c++) {
         out.push(
-          `<rect data-cell="${pi}:${i}:${c}" x="${n(x0 + c * sw)}" y="${n(y)}" width="${n(sw)}" height="${n(ROW_H)}" fill="transparent" class="fd-cell"/>`,
+          `<rect data-cell="${pi}:${topIndex}:${c}" x="${n(x0 + c * sw)}" y="${n(y)}" width="${n(sw)}" height="${n(ROW_H)}" fill="transparent" class="fd-cell"/>`,
         );
       }
-      out.push(`<rect data-rowname="${pi}:${i}" x="0" y="${n(y)}" width="${n(LABEL_W - 8)}" height="${n(ROW_H)}" fill="transparent" class="fd-rowname"/>`);
+      out.push(`<rect data-rowname="${pi}:${topIndex}" x="0" y="${n(y)}" width="${n(LABEL_W - 8)}" height="${n(ROW_H)}" fill="transparent" class="fd-rowname"/>`);
+    }
+  };
+
+  // 顶层行按顺序画；group 的子信号紧跟在标题行下面缩进显示
+  let rowY = top0;
+  panel.rows.forEach((row, i) => {
+    drawRow(row, rowY, 0, i);
+    rowY += ROW_H;
+    if (row.type === 'group') {
+      for (const child of row.children ?? []) {
+        drawRow(child, rowY, 18, null);
+        rowY += ROW_H;
+      }
     }
   });
 
@@ -1050,13 +1208,13 @@ function panelBody(
   const ay = top0 + height + 4;
   const axisEnd = x0 + panel.steps * sw;
   out.push(`<line x1="${n(x0)}" y1="${n(ay)}" x2="${n(axisEnd)}" y2="${n(ay)}" stroke="${p.axis}" stroke-width="1"/>`);
-  const every = panel.steps > 32 ? 8 : 4;
+  const every = labelEvery(d, panel);
   for (let i = 0; i <= panel.steps; i++) {
     if (i % every !== 0 && i !== panel.steps) continue;
     const x = x0 + i * sw;
     out.push(`<line x1="${n(x)}" y1="${n(ay)}" x2="${n(x)}" y2="${n(ay + 4)}" stroke="${p.axis}" stroke-width="1"/>`);
-    const ns = i * tick;
-    const label = tick >= 1 ? String(Math.round(ns)) : String(Number(ns.toFixed(1)));
+    // 刻度按真实 ns 标：tick 可以是 3.37 这种推导值，不能四舍五入成整数骗人
+    const label = numText(i * tick, 2);
     out.push(
       `<text x="${n(x)}" y="${n(ay + 16)}" text-anchor="middle" font-family="${MONO}" font-size="9.5" fill="${p.textDim}">${label}</text>`,
     );
@@ -1096,7 +1254,7 @@ export function effectiveValues(row: { values: string[]; type?: string }, steps:
 }
 
 function clockPath(
-  row: { period?: number; duty?: number; phase?: number; color?: string },
+  row: { period?: number; periodNs?: number; duty?: number; phase?: number; color?: string },
   x0: number,
   sw: number,
   steps: number,
@@ -1104,23 +1262,34 @@ function clockPath(
   bot: number,
   p: Palette,
   color?: string,
+  tick = 10,
 ): string {
-  const period = Math.max(2, Math.round(row.period ?? 2));
-  const duty = row.duty ?? 0.5;
+  // 有真实周期就按 ns 折算成"拍"的小数来画沿：148.5 MHz 就是 6.734 拍，
+  // 不再四舍五入成偶数拍（旧实现会把 100 MHz 画成 74 MHz）。
+  const period = Math.max(0.05, row.periodNs && row.periodNs > 0 ? row.periodNs / tick : Math.max(2, Math.round(row.period ?? 2)));
+  const duty = Math.min(0.95, Math.max(0.05, row.duty ?? 0.5));
+  const high = period * duty;
   const phase = (((row.phase ?? 0) % period) + period) % period;
-  const highCols = Math.min(period, Math.max(1, Math.round(period * duty)));
-  let d = '';
-  let prevHigh: boolean | null = null;
-  for (let i = 0; i < steps; i++) {
-    const within = (((i - phase) % period) + period) % period;
-    const isHigh = within < highCols;
-    const y = isHigh ? top : bot;
-    const x = x0 + i * sw;
-    if (prevHigh === null) d = `M${n(x)},${n(y)}`;
-    else if (prevHigh !== isHigh) d += ` V${n(y)}`;
-    d += ` H${n(x + sw)}`;
-    prevHigh = isHigh;
+  const levelAt = (t: number): boolean => {
+    const m = (((t - phase) % period) + period) % period;
+    return m < high;
+  };
+  let d = `M${n(x0)},${n(levelAt(0) ? top : bot)}`;
+  let t = 0;
+  let highNow = levelAt(0);
+  const eps = 1e-9;
+  // 直接算下一个上升/下降沿的时刻，不靠"当前电平"递推：
+  // 周期是小数时（148.5 MHz = 2.694 拍），浮现误差会让递推卡在沿上不动。
+  for (let guard = 0; guard < 20000; guard++) {
+    const rise = phase + (Math.floor((t - phase) / period + eps) + 1) * period;
+    const fall = phase + high + (Math.floor((t - phase - high) / period + eps) + 1) * period;
+    const next = Math.min(rise, fall);
+    if (next >= steps - eps) break;
+    highNow = !highNow;
+    d += ` H${n(x0 + next * sw)} V${n(highNow ? top : bot)}`;
+    t = next;
   }
+  d += ` H${n(x0 + steps * sw)}`;
   return `<path d="${d}" fill="none" stroke="${color ?? p.clock}" stroke-width="1.7" stroke-linejoin="miter"/>`;
 }
 
@@ -1298,6 +1467,7 @@ export class RenderCache {
       title: d.title,
       options: d.options,
       tick: d.tick,
+      tickAuto: d.tickAuto,
       nodes: d.nodes.map((nd) => ({
         id: nd.id,
         type: nd.type,
@@ -1332,6 +1502,7 @@ export class RenderCache {
       handles: opt?.handles,
       interactive: opt?.interactive,
       waypointHandles: opt?.waypointHandles,
+      zoom: opt?.zoom,
       theme: opt?.theme,
     };
     return JSON.stringify(core);

@@ -1,16 +1,23 @@
-import { Diagram, DiagramNode, shapeOf } from './model';
+import { Diagram, DiagramNode, portLabel, shapeOf } from './model';
 import { measure, wrap } from './text';
 
 const GAP_X = 82;
 const GAP_Y = 34;
 const PAD = 24;
 
-/** 根据文字与端口数量把节点尺寸调到刚好合适 */
+/** 根据文字与端口数量把节点尺寸调到刚好合适（只用于没有显式尺寸的节点） */
 function fitNode(d: Diagram, nd: DiagramNode): void {
   if (nd.type === 'init' || nd.type === 'final' || nd.type === 'junction') return;
+  // 用户拖过边框（或文件里写了 w/h/size）就完全按给定尺寸来。
+  // 以前这里每次渲染都按文字回算，导致拖高被 220 截断、拖窄被文字顶回去。
+  if (nd.size) {
+    nd.w = nd.size[0];
+    nd.h = nd.size[1];
+    return;
+  }
   const shape = shapeOf(nd.type, d.kind);
-  const baseW = nd.size?.[0] ?? shape.w;
-  const baseH = nd.size?.[1] ?? shape.h;
+  const baseW = shape.w;
+  const baseH = shape.h;
   const fs = 13;
   const avail = Math.max(72, baseW - 28);
   const lines = wrap(nd.label, avail, fs);
@@ -27,8 +34,8 @@ function fitNode(d: Diagram, nd: DiagramNode): void {
 
 function maxPortLabel(nd: DiagramNode): number {
   if (!nd.ports.length) return 0;
-  const left = nd.ports.filter((p) => p.side === 'l').map((p) => measure(p.name, 10));
-  const right = nd.ports.filter((p) => p.side === 'r').map((p) => measure(p.name, 10));
+  const left = nd.ports.filter((p) => p.side === 'l').map((p) => measure(portLabel(p), 10));
+  const right = nd.ports.filter((p) => p.side === 'r').map((p) => measure(portLabel(p), 10));
   const l = left.length ? Math.max(...left) : 0;
   const r = right.length ? Math.max(...right) : 0;
   return l + r + 34;
@@ -88,6 +95,15 @@ export function layout(d: Diagram): void {
       g.y = y;
       g.w = g.size?.[0] ?? 280;
       g.h = g.size?.[1] ?? 170;
+    }
+    // 拖过边框的容器：宽高和位置以显式值为准，不再被内容自动撑回去
+    if (g.size) {
+      g.w = g.size[0];
+      g.h = g.size[1];
+      if (g.pos) {
+        g.x = g.pos[0];
+        g.y = g.pos[1];
+      }
     }
   }
 }
@@ -294,6 +310,11 @@ function layered(d: Diagram, nodes: DiagramNode[]): void {
   const dir = d.options.direction;
   const horiz = dir === 'LR' || dir === 'RL';
   const reverse = dir === 'RL' || dir === 'BT';
+  // layerSpacing 控层间距（主轴），nodeSpacing 控同层间距（交叉轴）
+  const gapMain =
+    d.options.layerSpacing && d.options.layerSpacing > 0 ? d.options.layerSpacing : horiz ? GAP_X : GAP_Y;
+  const gapCross =
+    d.options.nodeSpacing && d.options.nodeSpacing > 0 ? d.options.nodeSpacing : horiz ? GAP_Y : GAP_X;
   const primary = (a: number, b: number) => (horiz ? a : b);
 
   // 主轴坐标
@@ -306,12 +327,12 @@ function layered(d: Diagram, nodes: DiagramNode[]): void {
       if (horiz) n.x = cursor + offset;
       else n.y = cursor + offset;
     }
-    cursor += layerSpan[li] + (horiz ? GAP_X : GAP_Y);
+    cursor += layerSpan[li] + gapMain;
   });
 
   // RL / BT：把主轴坐标镜像翻转，让数据流从右到左 / 从下到上
   if (reverse) {
-    const totalMain = cursor - (horiz ? GAP_X : GAP_Y);
+    const totalMain = cursor - gapMain;
     for (const n of nodes) {
       if (horiz) n.x = totalMain - n.x - n.w;
       else n.y = totalMain - n.y - n.h;
@@ -320,7 +341,7 @@ function layered(d: Diagram, nodes: DiagramNode[]): void {
 
   // 交叉轴坐标
   const crossSpan = layers.map((layer) =>
-    layer.reduce((s, n) => s + (horiz ? n.h : n.w), 0) + Math.max(0, layer.length - 1) * (horiz ? GAP_Y : GAP_X),
+    layer.reduce((s, n) => s + (horiz ? n.h : n.w), 0) + Math.max(0, layer.length - 1) * gapCross,
   );
   const maxCross = Math.max(...crossSpan);
   layers.forEach((layer, li) => {
@@ -328,7 +349,7 @@ function layered(d: Diagram, nodes: DiagramNode[]): void {
     for (const n of layer) {
       if (horiz) n.y = c;
       else n.x = c;
-      c += (horiz ? n.h : n.w) + (horiz ? GAP_Y : GAP_X);
+      c += (horiz ? n.h : n.w) + gapCross;
     }
   });
 }

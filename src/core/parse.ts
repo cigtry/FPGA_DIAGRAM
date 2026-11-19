@@ -13,12 +13,15 @@ import {
   TimingRow,
   LOW_LEVEL_TYPES,
   emptyDiagram,
+  isKnownType,
   isLowLevelType,
   normalizeDir,
   resolveKind,
   resolveType,
+  numText,
   shapeOf,
   syncClockFreqs,
+  timingStats,
 } from './model';
 
 export interface Diagnostic {
@@ -53,6 +56,8 @@ const SIDES: Record<string, Side> = {
   下: 'b',
 };
 
+const SIDE_CN: Record<Side, string> = { l: '左边', r: '右边', t: '上边', b: '下边' };
+
 const STYLE_WORDS: Record<string, EdgeStyle> = {
   bus: 'bus',
   总线: 'bus',
@@ -78,6 +83,94 @@ const ROUTE_WORDS: Record<string, EdgeRoute> = {
   曲线: 'curve',
   curved: 'curve',
 };
+
+// ---------------------------------------------------------------- 字段白名单
+// 以前键名写错（signals 写成 signal、nodes 写成 note）会静默通过：
+// validate 返回 ok，图是空的，AI 拿不到任何反馈。这里对未知字段给 warning，
+// 并附最近键名提示；`validate --strict` 会把它升级成 error。
+
+const SCENE_KEYS = new Set([
+  'version', 'kind', 'diagram_type', 'diagramType', 'title', 'id', 'direction', 'layout', 'tick', 'tickNs',
+  'options', 'nodes', 'states', 'modules', 'edges', 'transitions', 'links', 'panels', 'groups', 'views',
+  'signals', 'steps', 'meta', 'note', 'description',
+]);
+
+const NODE_KEYS = new Set([
+  'id', 'name', 'label', 'sub', 'note', 'type', 'shape', 'ports', 'io', 'pos', 'x', 'y', 'size', 'children',
+  'style', 'frame', 'dash', 'titlePos', 'titlepos', 'collapsed', 'data',
+]);
+
+const EDGE_KEYS = new Set([
+  'from', 'to', 'source', 'target', 'from_port', 'to_port', 'label', 'text', 'action', 'style', 'visual',
+  'route', 'arrow', 'waypoints', 'id',
+]);
+
+const ROW_KEYS = new Set([
+  'name', 'id', 'type', 'values', 'value', 'wave', 'color', 'colour', 'width', 'bits', 'order', 'freq', 'mhz',
+  'frequency', 'period', 'duty', 'phase', 'children', 'signals',
+]);
+
+const PANEL_KEYS = new Set(['title', 'name', 'steps', 'signals', 'rows', 'waveforms']);
+
+/** 文件级：单图字段 + 多视图头，避免把 scenes 误报成未知键 */
+const FILE_KEYS = new Set([...SCENE_KEYS, 'scenes', 'active']);
+
+/** 编辑距离（只用于"是否想写 X"的提示，短字符串足够） */
+function editDistance(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  if (!m) return n;
+  if (!n) return m;
+  let prev = Array.from({ length: n + 1 }, (_, i) => i);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[n];
+}
+
+function nearestKey(key: string, allowed: Set<string>): string | undefined {
+  const low = key.toLowerCase();
+  let best: string | undefined;
+  let bestD = Infinity;
+  for (const cand of allowed) {
+    const d = editDistance(low, cand.toLowerCase());
+    if (d < bestD) {
+      bestD = d;
+      best = cand;
+    }
+  }
+  return best && bestD <= Math.max(2, Math.floor(key.length / 3)) ? best : undefined;
+}
+
+function warnUnknownKeys(
+  o: Record<string, unknown>,
+  allowed: Set<string>,
+  where: string,
+  diags: Diagnostic[],
+  line?: number,
+): void {
+  for (const k of Object.keys(o)) {
+    if (allowed.has(k)) continue;
+    const near = nearestKey(k, allowed);
+    diags.push({
+      severity: 'warning',
+      message: `${where}的字段 "${k}" 无法识别${near ? `，是否想写 "${near}"？` : ''}`,
+      line,
+    });
+  }
+}
+
+/** 端口引用可以带位宽后缀，如 `awaddr[19:0]` */
+function portByRef(nd: DiagramNode, ref: string): Port | undefined {
+  const norm = (s: string) => s.replace(/\s+/g, '');
+  const want = norm(ref);
+  return nd.ports.find((p) => norm(p.name) === want || (!!p.width && norm(`${p.name}[${p.width}]`) === want));
+}
+
 
 /**
  * 行号索引。旧实现是 `lines.findIndex(l => l.includes(needle))`：
@@ -203,7 +296,11 @@ function normPorts(raw: unknown, diags: Diagnostic[]): Port[] {
       width = width ?? wm[2];
     }
     if (!nm) return;
-    if (out.some((p) => p.name === nm)) return;
+    // 以前这里静默丢弃：`l:clk | r:clk` 只剩一个端口，图上少一根线也不报
+    if (out.some((p) => p.name === nm)) {
+      diags.push({ severity: 'warning', message: `端口 "${nm}" 重复声明，后一个已忽略` });
+      return;
+    }
     out.push({ id: nm, name: nm, side, ...(dir ? { dir } : {}), ...(width ? { width } : {}) });
   };
 
@@ -384,9 +481,12 @@ function normValues(raw: unknown): string[] {
 const MIN_STEPS = 4;
 const MAX_STEPS = 512;
 
-function normSteps(raw: unknown, rows: TimingRow[], fallback = 16): number {
+function normSteps(raw: unknown, rows: TimingRow[], fallback = 16, diags?: Diagnostic[]): number {
   let steps = Number(raw ?? 0) || 0;
   for (const r of rows) steps = Math.max(steps, r.values.length);
+  if (steps > MAX_STEPS && diags) {
+    diags.push({ severity: 'warning', message: `时序格数 ${steps} 超过上限 ${MAX_STEPS}，已截断` });
+  }
   return Math.min(MAX_STEPS, Math.max(MIN_STEPS, steps || fallback));
 }
 
@@ -420,6 +520,7 @@ function makeRow(o: Record<string, any>, diags: Diagnostic[]): TimingRow | null 
     diags.push({ severity: 'warning', message: '有一行信号缺少 name，已跳过' });
     return null;
   }
+  warnUnknownKeys(o, ROW_KEYS, `信号 "${name}"`, diags);
   let type = String(o.type ?? 'logic').toLowerCase();
   if (['clk', '时钟'].includes(type)) type = 'clock';
   if (['bus', '总线', 'data'].includes(type)) type = 'bus';
@@ -459,7 +560,9 @@ function makeRow(o: Record<string, any>, diags: Diagnostic[]): TimingRow | null 
 }
 
 /** 解析一组时序面板：panels[i] 自带 steps / signals */
-function parsePanel(o: Record<string, any>, diags: Diagnostic[], fallbackSteps = 16): TimingPanel {
+function parsePanel(o: Record<string, any>, diags: Diagnostic[], fallbackSteps = 16, root = false): TimingPanel {
+  // 根上的单组时序已经由"文件 / 图纸"两层查过字段，这里不再重复报
+  if (!root) warnUnknownKeys(o, PANEL_KEYS, '时序组', diags);
   const rows = (Array.isArray(o.signals ?? o.rows ?? o.waveforms) ? (o.signals ?? o.rows ?? o.waveforms) : []) as unknown[];
   const panel: TimingPanel = { steps: fallbackSteps, rows: [] };
   const title = asString(o.title) ?? asString(o.name);
@@ -473,7 +576,13 @@ function parsePanel(o: Record<string, any>, diags: Diagnostic[], fallbackSteps =
     const row = makeRow(r as Record<string, any>, diags);
     if (row) panel.rows.push(row);
   }
-  panel.steps = normSteps(o.steps, panel.rows, fallbackSteps);
+  // 同名信号会让"改一条"变成"改错一条"，尤其在 AI 生成的文件里
+  const seen = new Map<string, number>();
+  for (const r of panel.rows) seen.set(r.name, (seen.get(r.name) ?? 0) + 1);
+  for (const [name, cnt] of seen) {
+    if (cnt > 1) diags.push({ severity: 'warning', message: `同一组里信号名 "${name}" 重复 ${cnt} 次，可能有一行不会被看清` });
+  }
+  panel.steps = normSteps(o.steps, panel.rows, fallbackSteps, diags);
   padRows(panel.rows, panel.steps);
   return panel;
 }
@@ -489,15 +598,52 @@ function parseTiming(d: Record<string, any>, diagram: Diagram, diags: Diagnostic
     diags.push({ severity: 'error', message: 'panels 必须是非空列表' });
   }
   if (!diagram.panels.length) {
-    diagram.panels.push(parsePanel(d, diags));
+    diagram.panels.push(parsePanel(d, diags, 16, true));
   }
   if (!diagram.panels.some((p) => p.rows.length)) {
     // 允许空图（新建时序图），不当作错误
   }
 }
 
+/**
+ * 网格 / 时钟周期 / 组时长三者必须对得上，否则图会自相矛盾：
+ * 100 MHz（10 ns/周期）配 tick 5 画 16 格，标题却写「16 拍」，而计数只有 8 拍。
+ */
+function checkTimingGrid(d: Diagram, diags: Diagnostic[]): void {
+  // 只检查用户自己写的 tick：tickAuto 是工具挑的，替工具的选择报错没意义
+  if (!(d.tick && d.tick > 0)) return;
+  d.panels.forEach((panel, i) => {
+    const st = timingStats(d, panel);
+    if (!st.hasClock) return;
+    const where = panel.title ? `「${panel.title}」` : `第 ${i + 1} 组`;
+    const cpb = st.cellsPerBeat;
+    const half = st.beatNs / 2;
+    if (cpb < 1 - 1e-9) {
+      diags.push({
+        severity: 'warning',
+        message: `时序组${where}：网格 ${numText(st.tick)} ns 比时钟周期 ${numText(st.beatNs)} ns 还粗，一个周期不到一格，时钟会被挤成锯齿；把 tick 改成 ${numText(half)} 左右`,
+      });
+      return;
+    }
+    if (Math.abs(cpb - Math.round(cpb)) > 1e-3) {
+      diags.push({
+        severity: 'warning',
+        message: `时序组${where}：时钟周期 ${numText(st.beatNs)} ns 不是网格 ${numText(st.tick)} ns 的整数倍（${cpb.toFixed(2)} 格/周期），时钟沿会落在格子中间、计数拍和竖线对不齐；建议 tick: ${numText(half)}`,
+      });
+      return;
+    }
+    if (Math.abs(st.beats - Math.round(st.beats)) > 1e-3) {
+      diags.push({
+        severity: 'warning',
+        message: `时序组${where}：${panel.steps} 格 × ${numText(st.tick)} ns = ${numText(st.spanNs)} ns，不到整数拍（${st.beats.toFixed(2)} 拍），最后一拍会被画断；把 steps 调到 ${Math.round(st.spanNs / st.beatNs) * Math.round(cpb)} 左右`,
+      });
+    }
+  });
+}
+
 /** 把一个已 load 的 YAML 映射解析成一张图 */
 function parseSceneObject(d: Record<string, any>, hintKind: Kind | undefined, diags: Diagnostic[], idx: LineIndex): Diagram {
+  warnUnknownKeys(d, SCENE_KEYS, '图纸', diags, idx.key('kind') ?? idx.key('diagram_type'));
   // diagram_type 是新增的顶层绘图类型声明；旧文件只有 kind，也继续认。
   // 两者都没有时按内容推断，保持老图纸的兼容行为。
   const typeRaw = d.diagram_type ?? d.diagramType ?? d.kind;
@@ -542,13 +688,14 @@ function parseSceneObject(d: Record<string, any>, hintKind: Kind | undefined, di
   if (kind === 'timing') {
     parseTiming(d, diagram, diags);
     syncClockFreqs(diagram);
+    checkTimingGrid(diagram, diags);
     return diagram;
   }
 
   // ---- nodes ----
   const rawNodes = d.nodes ?? d.states ?? d.modules ?? [];
   const pushNode = (line: number | undefined, rawId: string, o: Record<string, any>) => {
-    const node = makeNode(rawId, kind, o, diags);
+    const node = makeNode(rawId, kind, o, diags, line);
     if (kind === 'system_block' && isLowLevelType(node.type)) {
       diags.push({
         severity: 'warning',
@@ -592,6 +739,9 @@ function parseSceneObject(d: Record<string, any>, hintKind: Kind | undefined, di
   if (!Array.isArray(rawEdges)) {
     diags.push({ severity: 'error', message: 'edges 必须是列表' });
   } else {
+    // 老文件里节点不写 ports、连线只写 .dout 的情况很常见：
+    // 每个节点只提示一次，别让 4 条线刷 8 条一样的警告。
+    const implicitWarned = new Set<string>();
     rawEdges.forEach((item, i) => {
       // 每条连线按文档顺序消费一个行号，报错才能指到这一条而不是文件里第一处
       const edgeLine = idx.nextSeq(edgeKey);
@@ -618,6 +768,7 @@ function parseSceneObject(d: Record<string, any>, hintKind: Kind | undefined, di
             return;
           }
         } else {
+          warnUnknownKeys(o, EDGE_KEYS, '连线', diags, edgeLine);
           const from = typeof o.from === 'string' ? splitEndpoint(o.from) : { node: asString(o.from?.node) ?? asString(o.source) ?? '', port: asString(o.from?.port) ?? asString(o.from_port), side: o.from?.side };
           const to = typeof o.to === 'string' ? splitEndpoint(o.to) : { node: asString(o.to?.node) ?? asString(o.target) ?? '', port: asString(o.to?.port) ?? asString(o.to_port), side: o.to?.side };
           // style 旧写法是字符串（wire/bus/...），v2 是视觉对象；两者可同时出现
@@ -655,6 +806,34 @@ function parseSceneObject(d: Record<string, any>, hintKind: Kind | undefined, di
         });
         return;
       }
+
+      // 端口存在性 / 所在边校验：端口名写错过去会静默退化成"边中点"，
+      // 图上看着有线，实际电气连接是错的。
+      const checkPort = (nd: DiagramNode, ref: string | undefined, side: Side | undefined, end: '起点' | '终点') => {
+        if (!ref) return;
+        const p = portByRef(nd, ref);
+        if (!p) {
+          const declared = nd.ports.map((x) => x.name);
+          const near = nearestKey(ref.replace(/\[[^\]]*\]$/, ''), new Set(declared));
+          const msg = declared.length
+            ? `连线${end}引用了 "${nd.id}" 上不存在的端口 "${ref}"（该节点端口：${declared.join(', ')}${near ? `；是否想写 "${near}"` : ''}）`
+            : `连线${end}引用了端口 "${ref}"，但节点 "${nd.id}" 没有声明任何端口`;
+          if (!declared.length && implicitWarned.has(nd.id)) return;
+          if (!declared.length) implicitWarned.add(nd.id);
+          diags.push({ severity: declared.length ? 'error' : 'warning', message: msg, line: edgeLine });
+          return;
+        }
+        if (side && side !== p.side) {
+          diags.push({
+            severity: 'warning',
+            message: `端口 "${p.name}" 在 ${SIDE_CN[p.side]}，连线写的是 ${SIDE_CN[side]}；已按端口实际所在边绘制`,
+            line: edgeLine,
+          });
+        }
+      };
+      checkPort(diagram.nodes.find((nd) => nd.id === partial!.from!.node)!, partial.from.port, partial.from.side, '起点');
+      checkPort(diagram.nodes.find((nd) => nd.id === partial!.to!.node)!, partial.to.port, partial.to.side, '终点');
+
       diagram.edges.push({
         id: `e${i}`,
         from: partial.from,
@@ -700,6 +879,7 @@ export function parseFile(text: string, hintKind?: Kind): ParseFileResult {
   }
 
   const d = doc as Record<string, any>;
+  warnUnknownKeys(d, FILE_KEYS, '文件', diagnostics, 1);
   // 用未 trim 的原文建索引，否则开头的空行会把所有行号整体偏移
   const idx = buildLineIndex(text);
 
@@ -747,11 +927,26 @@ export function parseFile(text: string, hintKind?: Kind): ParseFileResult {
     }
     let active = Number(d.active ?? 0) || 0;
     if (active < 0 || active >= scenes.length) active = 0;
-    return { file: { scenes, active, ...header }, diagnostics };
+    return { file: { scenes, active, ...header }, diagnostics: dedupeDiagnostics(diagnostics) };
   }
 
   const scene = parseSceneObject(d, hintKind, diagnostics, idx);
-  return { file: { scenes: [scene], active: 0, ...header }, diagnostics };
+  return { file: { scenes: [scene], active: 0, ...header }, diagnostics: dedupeDiagnostics(diagnostics) };
+}
+
+/**
+ * 单图文件的根对象同时被"文件 / 图纸 / 时序组"三层检查，
+ * 同一个笔误会报三遍；按 内容+行号 去重，保留一条就够。
+ */
+function dedupeDiagnostics(diags: Diagnostic[]): Diagnostic[] {
+  const seen = new Set<string>();
+  return diags.filter((d) => {
+    const field = /字段 "([^"]+)"/.exec(d.message)?.[1];
+    const key = field ? `f|${d.line ?? ''}|${field}` : `m|${d.severity}|${d.line ?? ''}|${d.message}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 /** 兼容接口：只取当前激活的那张图 */
@@ -760,14 +955,27 @@ export function parseDiagram(text: string, hintKind?: Kind): ParseResult {
   return { diagram: file.scenes[file.active] ?? file.scenes[0], diagnostics };
 }
 
-function makeNode(id: string, kind: Kind, o: Record<string, any>, diags: Diagnostic[]): DiagramNode {
-  const type = resolveType(asString(o.type) ?? asString(o.shape), kind);
+function makeNode(id: string, kind: Kind, o: Record<string, any>, diags: Diagnostic[], line?: number): DiagramNode {
+  warnUnknownKeys(o, NODE_KEYS, `节点 "${id}"`, diags, line);
+  const rawType = asString(o.type) ?? asString(o.shape);
+  if (rawType && !isKnownType(rawType, kind)) {
+    diags.push({
+      severity: 'warning',
+      message: `节点 "${id}" 的类型 "${rawType}" 无法识别，已按 ${kind === 'fsm' ? '状态' : '模块'} 处理`,
+      line,
+    });
+  }
+  const type = resolveType(rawType, kind);
   const shape = shapeOf(type, kind);
   let w = shape.w;
   let h = shape.h;
+  // 只有文件里显式写了 size 才算"固定尺寸"；否则交给布局按文字自适应。
+  // 布局层看到 size 就完全照用，不再按文字回弹（拖边框改尺寸才不会被吃掉）。
+  let fixedSize: [number, number] | undefined;
   if (Array.isArray(o.size) && o.size.length >= 2) {
     w = Number(o.size[0]) || w;
     h = Number(o.size[1]) || h;
+    fixedSize = [w, h];
   }
   let pos: [number, number] | undefined;
   if (Array.isArray(o.pos) && o.pos.length >= 2) {
@@ -801,7 +1009,7 @@ function makeNode(id: string, kind: Kind, o: Record<string, any>, diags: Diagnos
     w,
     h,
     pos,
-    size: [w, h],
+    ...(fixedSize ? { size: fixedSize } : {}),
     ports: normPorts(o.ports ?? o.io, diags),
     children: children?.filter(Boolean),
     ...(dashed ? { dash: true } : {}),

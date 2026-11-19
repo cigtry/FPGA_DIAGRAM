@@ -41,7 +41,7 @@ transitions:
 
 export const TIMING_SAMPLE = `# FPGA Diagram · timing
 # 一条信号一行，多组时序用 panels（同图纵向排列，各有自己的时间轴）
-# 时钟写 freq（MHz），多时钟按最快时钟自动细分网格；tick 是每拍多少 ns
+# 时钟写 freq（MHz），多时钟按最快时钟自动细分网格；tick 是每格多少 ns（1 拍 = 1 个时钟周期）
 # 单比特 values 用 0/1/z/x，. 表示保持；总线写值名，值保持到下一段
 kind: timing
 title: AXI 写通道时序

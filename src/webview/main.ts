@@ -12,15 +12,17 @@ import {
   TimingRow,
   emptyDiagram,
   emptyTimingPanel,
+  numText,
   shapeOf,
   shapesFor,
   syncClockFreqs,
+  timingStats,
 } from '../core/model';
 import { BUS_GROUPS, BusGroupId, BusRole, expandBusGroup, suggestNodeSize } from '../core/busGroups';
 import { CommandStore, Snapshot, snapshotOf } from '../core/commands';
 import { InteractionManager, modeToState } from '../core/interaction';
 import { Diagnostic, parseFile } from '../core/parse';
-import { RenderCache, edgeMidpoint, effectiveValues, freqLabel, portAnchor, render, resolveEdge, svgDocument } from '../core/render';
+import { RenderCache, edgeMidpoint, effectiveValues, freqLabel, portAnchor, render, resolveEdge, rowsHeight, svgDocument, tickOf } from '../core/render';
 import { patchPositions, serializeFile } from '../core/serialize';
 import { sample } from '../core/examples';
 import { Palette, ThemeName, palette } from '../core/theme';
@@ -53,6 +55,8 @@ const S: {
   /** 画布背景：auto 跟随 VS Code，light/dark 强制指定 */
   canvasTheme: 'auto' | ThemeName;
   grid: boolean;
+  /** 网格显示间距（px），可由文档 options.gridSize 指定 */
+  gridSize: number;
   /** 画布中心点标记 */
   center: boolean;
   snap: boolean;
@@ -80,6 +84,7 @@ const S: {
   hover: null,
   canvasTheme: 'auto',
   grid: true,
+  gridSize: 20,
   center: true,
   snap: true,
   brush: 'toggle',
@@ -96,9 +101,10 @@ if (savedPrefs.canvasTheme === 'auto' || savedPrefs.canvasTheme === 'light' || s
   S.canvasTheme = savedPrefs.canvasTheme;
 }
 if (typeof savedPrefs.grid === 'boolean') S.grid = savedPrefs.grid;
+if (Number(savedPrefs.gridSize) > 0) S.gridSize = Math.max(4, Math.min(200, Number(savedPrefs.gridSize)));
 if (typeof savedPrefs.center === 'boolean') S.center = savedPrefs.center;
 function persistPrefs(): void {
-  vscode.setState({ canvasTheme: S.canvasTheme, grid: S.grid, center: S.center });
+  vscode.setState({ canvasTheme: S.canvasTheme, grid: S.grid, gridSize: S.gridSize, center: S.center });
 }
 
 /** 当前文档快照（给 CommandStore 用） */
@@ -209,6 +215,7 @@ function paint(): void {
     selRow: S.sel.row !== null ? { panel: S.sel.panel ?? S.activePanel, row: S.sel.row } : null,
     waypointHandles: S.sel.edges.length === 1 && !S.sel.nodes.length,
     interactive: true,
+    zoom: S.view.k,
   });
   S.res = { w: res.width, h: res.height };
   canvas.innerHTML = res.body;
@@ -239,11 +246,26 @@ function zoomCentered(nextK: number): void {
   S.view.x = c.x - r.width / k / 2;
   S.view.y = c.y - r.height / k / 2;
   applyView();
+  syncHandleScale();
+}
+
+/**
+ * 手柄/命中带按 zoom 反向补偿，屏幕上大小恒定；缩放后补一次重绘即可生效。
+ * 只在有选中节点时重画，避免无选中时白白重建整张图。
+ */
+let zoomSyncFrame = 0;
+function syncHandleScale(): void {
+  if (!S.sel.nodes.length || zoomSyncFrame) return;
+  zoomSyncFrame = requestAnimationFrame(() => {
+    zoomSyncFrame = 0;
+    paint();
+  });
 }
 
 function paintGrid(): void {
+  const g = S.gridSize;
   const style = S.grid
-    ? `<defs><pattern id="gp" width="20" height="20" patternUnits="userSpaceOnUse"><path d="M20 0 L0 0 0 20" fill="none" stroke="${P.grid}" stroke-width="1"/></pattern></defs><rect x="-5000" y="-5000" width="10000" height="10000" fill="url(#gp)"/>`
+    ? `<defs><pattern id="gp" width="${g}" height="${g}" patternUnits="userSpaceOnUse"><path d="M${g} 0 L0 0 0 ${g}" fill="none" stroke="${P.grid}" stroke-width="1"/></pattern></defs><rect x="-5000" y="-5000" width="10000" height="10000" fill="url(#gp)"/>`
     : '';
   gridSvg.innerHTML = style;
   paintCenterMark();
@@ -264,8 +286,16 @@ function ctxZoomLabel(): void {
 function paintStatus(): void {
   const bits: string[] = [];
   if (S.doc.kind === 'timing') {
-    const rows = S.doc.panels.reduce((s, p) => s + p.rows.length, 0);
-    bits.push(`${S.doc.panels.length} 组 / ${rows} 条信号`, `每拍 ${S.doc.tick ?? 10} ns`);
+    const rows = S.doc.panels.reduce((s, p) => s + rowsHeight(p.rows), 0);
+    const tick = tickOf(S.doc);
+    bits.push(`${S.doc.panels.length} 组 / ${rows} 条信号`);
+    // 单组有时钟时报拍数，多组只报网格：拍长每组可能不同，糊在一起会算错
+    if (S.doc.panels.length === 1) {
+      const st = timingStats(S.doc, S.doc.panels[0]);
+      bits.push(st.hasClock ? `${numText(st.beats, 1)} 拍 / 每格 ${tick} ns` : `每格 ${tick} ns`);
+    } else {
+      bits.push(`每格 ${tick} ns`);
+    }
   } else {
     bits.push(`${S.doc.nodes.length} 节点`, `${S.doc.edges.length} 连线`);
   }
@@ -675,7 +705,7 @@ function paintTimingPalette(): void {
     item.title = '单击切换当前组，双击改组名';
     item.appendChild(el('span', 'sig-type', '▤'));
     item.appendChild(el('span', 'sig-name', p.title || `时序组 ${i + 1}`));
-    item.appendChild(el('span', 'sig-meta', `${p.steps} 拍`));
+    item.appendChild(el('span', 'sig-meta', `${p.steps} 格`));
     if (S.doc.panels.length > 1) {
       const x = el('span', 'sig-x', '×');
       x.title = '删除这一组时序';
@@ -701,7 +731,7 @@ function paintTimingPalette(): void {
     const len = el('div', 'brush-row step-row');
     const mk = (d: number, label: string) => {
       const b = el('button', '', label);
-      b.title = `当前组 ${d > 0 ? '加' : '减'} ${Math.abs(d)} 拍`;
+      b.title = `当前组 ${d > 0 ? '加' : '减'} ${Math.abs(d)} 格`;
       b.addEventListener('click', () => resizeSteps(d));
       return b;
     };
@@ -736,7 +766,7 @@ function paintTimingPalette(): void {
     item.appendChild(el('span', 'sig-drag', '⠿'));
     item.appendChild(el('span', 'sig-type', row.type === 'clock' ? '⏱' : row.type === 'bus' ? '⇄' : row.type === 'group' ? '▬' : '⎍'));
     item.appendChild(el('span', 'sig-name', row.name));
-    if (row.type === 'clock') item.appendChild(el('span', 'sig-meta', row.freq ? freqLabel(row.freq) : `${row.period ?? 2} 拍`));
+    if (row.type === 'clock') item.appendChild(el('span', 'sig-meta', row.freq ? freqLabel(row.freq) : `${row.period ?? 2} 格/周期`));
     item.title = '拖拽上下重排 · 单击选中 · 双击改名';
     item.addEventListener('dragstart', (ev) => {
       dragSigFrom = i;
@@ -1237,7 +1267,7 @@ function floatInput(value: number, onChange: (v: number) => void, step = 1): HTM
   return i;
 }
 
-/** 频率 → 周期（拍）并保证时间基准够细，多时钟才对得齐 */
+/** 频率 → 周期（ns）并保证网格够细，多时钟才对得齐 */
 function setClockFreq(row: TimingRow, mhz: number): void {
   row.freq = Math.max(0, mhz);
   if (row.freq > 0) syncClockFreqs(S.doc);
@@ -1298,7 +1328,7 @@ function paintSignalInspector(picked: { row: TimingRow; panel: TimingPanel; pane
   )));
 
   if (row.type === 'clock') {
-    const tick = S.doc.tick ?? 10;
+    const tick = tickOf(S.doc);
     inspectorEl.appendChild(field('频率（MHz）', floatInput(row.freq ?? 100, (v) => {
       setClockFreq(row, v);
       paint();
@@ -1306,19 +1336,20 @@ function paintSignalInspector(picked: { row: TimingRow; panel: TimingPanel; pane
       save();
     }, 5)));
     const ns = row.freq ? 1000 / row.freq : (row.period ?? 2) * tick;
-    inspectorEl.appendChild(el('div', 'insp-hint', `周期 ${row.period ?? 2} 拍 ≈ ${Number(ns.toFixed(2))} ns（每拍 ${tick} ns）`));
+    const ptxt = row.periodNs ? row.periodNs.toFixed(3).replace(/\.?0+$/, '') : String(Number(ns.toFixed(2)));
+    inspectorEl.appendChild(el('div', 'insp-hint', `周期 ${ptxt} ns ≈ ${(ns / tick).toFixed(2)} 格（每格 ${tick} ns）`));
     inspectorEl.appendChild(field('占空比 0-1', floatInput(row.duty ?? 0.5, (v) => {
       row.duty = Math.min(0.95, Math.max(0.05, v));
       paint();
       save();
     }, 0.05)));
-    inspectorEl.appendChild(field('相位（拍）', numInput(row.phase ?? 0, (v) => {
+    inspectorEl.appendChild(field('相位（格）', numInput(row.phase ?? 0, (v) => {
       row.phase = Math.round(v);
       paint();
       save();
     })));
   } else if (row.type === 'bus') {
-    inspectorEl.appendChild(el('div', 'insp-sub', '总线规则：值从所在拍开始保持，直到下一段；空格=保持，z=断开'));
+    inspectorEl.appendChild(el('div', 'insp-sub', '总线规则：值从所在格开始保持，直到下一段；空格=保持，z=断开'));
     const list = el('div', 'seg-list');
     const segs = busSegments(row);
     if (!segs.length) list.appendChild(el('div', 'sig-empty', '还没有值，点「＋ 段」加一段'));
@@ -1329,7 +1360,7 @@ function paintSignalInspector(picked: { row: TimingRow; panel: TimingPanel; pane
       at.min = '1';
       at.max = String(panel.steps);
       at.value = String(seg.start + 1);
-      at.title = '第几拍开始（从 1 数）';
+      at.title = '第几格开始（从 1 数）';
       at.addEventListener('change', () => {
         const nv = Math.min(panel.steps - 1, Math.max(0, Math.round(Number(at.value) || 1) - 1));
         if (nv === seg.start) return;
@@ -1338,7 +1369,7 @@ function paintSignalInspector(picked: { row: TimingRow; panel: TimingPanel; pane
         paint();
         save();
       });
-      at.title = '第几拍开始（从 1 数）';
+      at.title = '第几格开始（从 1 数）';
       const val = textInput(seg.value, (v) => {
         row.values[seg.start] = v.trim();
         paint();
@@ -1373,7 +1404,7 @@ function paintSignalInspector(picked: { row: TimingRow; panel: TimingPanel; pane
     inspectorEl.appendChild(addSeg);
   } else if (row.type === 'logic') {
     const seq = row.values.map((v) => (v === '' ? '.' : v)).join(' ');
-    inspectorEl.appendChild(field('逐拍电平（. 保持）', textInput(seq, (v) => {
+    inspectorEl.appendChild(field('逐格电平（. 保持）', textInput(seq, (v) => {
       const parts = v.split(/[\s,]+/).filter((x) => x !== '');
       const vals: string[] = [];
       for (let i = 0; i < panel.steps; i++) {
@@ -1449,8 +1480,8 @@ function paintTimingInspector(): void {
     paint();
     save();
   }, '可选')));
-  inspectorEl.appendChild(field('每拍时间（ns）', floatInput(S.doc.tick ?? 10, (v) => {
-    S.doc.tick = Math.max(0.1, v || 10);
+  inspectorEl.appendChild(field('每格时间（ns）', floatInput(tickOf(S.doc), (v) => {
+    S.doc.tick = Math.max(0.05, v || 10);
     syncClockFreqs(S.doc);
     paint();
     paintTimingPalette();
@@ -1466,20 +1497,25 @@ function paintTimingInspector(): void {
       paintTimingPalette();
       save();
     }, '如 写通道')));
-    inspectorEl.appendChild(field('拍数', numInput(panel.steps, (v) => {
+    inspectorEl.appendChild(field('格数', numInput(panel.steps, (v) => {
       snapshot();
       setPanelSteps(panel, v);
       paint();
       paintTimingPalette();
       save();
     })));
+    // 和标题右上角同一套数字：改格数时立刻看到拍数 / 总时长对不对
+    const st = timingStats(S.doc, panel);
+    inspectorEl.appendChild(
+      el('div', 'insp-hint', `${numText(st.beats, 1)} 拍 · ${numText(st.spanNs)} ns · 每格 ${numText(st.tick)} ns`),
+    );
   }
 
   const tip = el('div', 'insp-empty');
   tip.innerHTML = [
-    '网格的每一列是「一拍」，时间轴按 ns 标；',
+    '网格的每一列是「一格」，时间轴按 ns 标；',
     '时钟填<strong>频率</strong>，多时钟会按最快时钟自动细分网格；',
-    '总线用「值…」笔刷点格子，值从该拍保持到下一段；',
+    '总线用「值…」笔刷点格子，值从该格保持到下一段；',
     '一行只有一条波形，多组时序请用「＋ 组」。',
   ].join('<br>');
   inspectorEl.appendChild(tip);
@@ -1504,7 +1540,6 @@ function addNode(type: string, at?: Pt): void {
     w: shape.w,
     h: shape.h,
     pos: [Math.round(center.x), Math.round(center.y)],
-    size: [shape.w, shape.h],
     ports: [],
   };
   S.doc.nodes.push(nd);
@@ -1594,7 +1629,6 @@ function insertOnEdge(edgeId: string, type: string, at?: Pt): string | null {
     w: shape.w,
     h: shape.h,
     ...(manual ? { pos: [Math.round(mid.x - shape.w / 2), Math.round(mid.y - shape.h / 2)] as [number, number] } : {}),
-    size: [shape.w, shape.h],
     ports: [],
   };
 
@@ -1880,6 +1914,38 @@ let marquee: SVGRectElement | null = null;
 let tempLine: SVGLineElement | null = null;
 let paletteDragged = false;
 
+/** 拖尺寸时的实时尺寸气泡，松手即销毁 */
+let resizeHintEl: HTMLDivElement | null = null;
+
+function showResizeHint(w: number, h: number, ev: PointerEvent): void {
+  if (!resizeHintEl) {
+    resizeHintEl = el('div', 'resize-hint');
+    overlay.appendChild(resizeHintEl);
+  }
+  resizeHintEl.textContent = `${Math.round(w)} × ${Math.round(h)}`;
+  const r = stage.getBoundingClientRect();
+  const left = Math.min(Math.max(8, ev.clientX - r.left + 14), Math.max(8, r.width - 96));
+  const top = Math.min(Math.max(8, ev.clientY - r.top + 16), Math.max(8, r.height - 30));
+  resizeHintEl.style.left = `${left}px`;
+  resizeHintEl.style.top = `${top}px`;
+}
+
+function hideResizeHint(): void {
+  resizeHintEl?.remove();
+  resizeHintEl = null;
+}
+
+/** 拖尺寸期间锁住光标：指针滑出图形或被别的东西盖住也不会跳成默认箭头 */
+function lockResizeCursor(dir: string | null): void {
+  if (dir) {
+    document.body.classList.add('fd-resizing');
+    document.body.dataset.resizeDir = dir;
+    return;
+  }
+  document.body.classList.remove('fd-resizing');
+  delete document.body.dataset.resizeDir;
+}
+
 // --------------------------------------------------- 从调色板拖到连线中间
 
 // --------------------------------------------------- 从调色板拖到连线中间
@@ -2105,8 +2171,10 @@ stage.addEventListener('pointerdown', (ev: PointerEvent) => {
   const handleEl = target.closest('[data-handle]');
   const nd0 = selNode();
   if (handleEl && nd0) {
+    const dir = String(handleEl.getAttribute('data-handle'));
     snapshot();
-    S.drag = { mode: 'resize', dir: handleEl.getAttribute('data-handle'), start: u, node: nd0, rect: { x: nd0.x, y: nd0.y, w: nd0.w, h: nd0.h } };
+    S.drag = { mode: 'resize', dir, start: u, node: nd0, rect: { x: nd0.x, y: nd0.y, w: nd0.w, h: nd0.h } };
+    lockResizeCursor(dir);
     (stage as HTMLElement).setPointerCapture(ev.pointerId);
     ev.preventDefault();
     return;
@@ -2280,29 +2348,28 @@ window.addEventListener('pointermove', (ev: PointerEvent) => {
     const dx = u.x - d.start.x;
     const dy = u.y - d.start.y;
     const r0 = d.rect as { x: number; y: number; w: number; h: number };
-    let { x, y, w, h } = r0;
     const dir = String(d.dir);
-    if (dir.includes('w')) {
-      w = Math.max(26, r0.w - dx);
-      x = r0.x + (r0.w - w);
-    }
-    if (dir.includes('e')) w = Math.max(26, r0.w + dx);
-    if (dir.includes('n')) {
-      h = Math.max(22, r0.h - dy);
-      y = r0.y + (r0.h - h);
-    }
-    if (dir.includes('s')) h = Math.max(22, r0.h + dy);
-    if (S.snap) {
-      x = Math.round(x / 5) * 5;
-      y = Math.round(y / 5) * 5;
-      w = Math.round(w / 5) * 5;
-      h = Math.round(h / 5) * 5;
-    }
+    const minW = 26;
+    // 分组框顶部有 16px 标题栏，最小高度要把标题栏算进去，内容区才不会被压扁
+    const minH = nd.type === 'group' ? 38 : 22;
+    // 只吸附被拖的那条边，对侧保持不动：否则 x 和 w 各自 round 会让整块左右抖
+    const snap = (v: number) => (S.snap ? Math.round(v / 5) * 5 : Math.round(v));
+    let left = r0.x;
+    let top = r0.y;
+    let right = r0.x + r0.w;
+    let bottom = r0.y + r0.h;
+    if (dir.includes('w')) left = Math.min(snap(r0.x + dx), right - minW);
+    if (dir.includes('e')) right = Math.max(snap(r0.x + r0.w + dx), left + minW);
+    if (dir.includes('n')) top = Math.min(snap(r0.y + dy), bottom - minH);
+    if (dir.includes('s')) bottom = Math.max(snap(r0.y + r0.h + dy), top + minH);
+    const w = right - left;
+    const h = bottom - top;
     nd.w = w;
     nd.h = h;
     nd.size = [w, h];
-    nd.pos = [x, y];
+    nd.pos = [left, top];
     paint();
+    showResizeHint(w, h, ev);
     return;
   }
 
@@ -2357,6 +2424,10 @@ window.addEventListener('pointerup', (ev: PointerEvent) => {
   const d = S.drag;
   S.drag = null;
   interaction.end();
+  if (d?.mode === 'resize') {
+    lockResizeCursor(null);
+    hideResizeHint();
+  }
   if (d?.mode === 'pan') {
     stage.style.cursor = '';
     // contextmenu 紧跟 pointerup 触发；先保留抑制标记，稍后自动清理
@@ -2401,10 +2472,22 @@ window.addEventListener('pointerup', (ev: PointerEvent) => {
     return;
   }
 
-  if (d.mode === 'move' || d.mode === 'resize') {
+  if (d.mode === 'move') {
     paintInspector();
     paintToolbar();
     savePos();
+    return;
+  }
+
+  if (d.mode === 'resize') {
+    const nd = d.node as DiagramNode;
+    const r0 = d.rect as { x: number; y: number; w: number; h: number };
+    // 只是点了一下边框、并没有真的改尺寸：别白写一次文件
+    if (nd.w === r0.w && nd.h === r0.h && nd.x === r0.x && nd.y === r0.y) return;
+    paintInspector();
+    paintToolbar();
+    // 尺寸是结构改动：只补 pos 会丢宽高，必须整段回写
+    save();
     return;
   }
 
@@ -2419,6 +2502,16 @@ window.addEventListener('pointerup', (ev: PointerEvent) => {
     save();
   }
 });
+
+// 拖拽被系统打断（触控取消、窗口失焦）时也要还原光标和尺寸气泡
+for (const evName of ['pointercancel', 'blur'] as const) {
+  window.addEventListener(evName, () => {
+    if (S.drag?.mode === 'resize') {
+      lockResizeCursor(null);
+      hideResizeHint();
+    }
+  });
+}
 
 stage.addEventListener('contextmenu', (ev: MouseEvent) => {
   if (suppressContext) {
@@ -2521,6 +2614,7 @@ stage.addEventListener(
     S.view.x = u.x - (ev.clientX - r.left) / k;
     S.view.y = u.y - (ev.clientY - r.top) / k;
     applyView();
+    syncHandleScale();
   },
   { passive: false },
 );
@@ -2716,6 +2810,7 @@ function fitView(): void {
   S.view.x = -((r.width / k - w) / 2);
   S.view.y = -((r.height / k - h) / 2);
   applyView();
+  syncHandleScale();
 }
 
 // ------------------------------------------------------------------ host sync
@@ -2772,6 +2867,14 @@ function applyFileText(text: string, external: boolean): void {
     ...(file.meta ? { meta: file.meta } : {}),
     ...(file.options ? { options: file.options } : {}),
   };
+  // 文档级 options 真正生效：网格显示与吸附开关
+  if (external) {
+    const fo = (file.options ?? {}) as Record<string, unknown>;
+    if (typeof fo.grid === 'boolean') S.grid = fo.grid;
+    if (typeof fo.snapToGrid === 'boolean') S.snap = fo.snapToGrid;
+    if (Number(fo.gridSize) > 0) S.gridSize = Math.max(4, Math.min(200, Number(fo.gridSize)));
+    paintGrid();
+  }
   S.doc = S.scenes[S.active];
   S.kind = S.doc.kind;
   if (!keepUi) S.activePanel = 0;

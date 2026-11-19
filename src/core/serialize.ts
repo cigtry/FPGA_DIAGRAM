@@ -127,7 +127,9 @@ function sceneLines(d: Diagram): string[] {
     }
     if (nd.collapsed) fields.push('collapsed: true');
     if (nd.data && Object.keys(nd.data).length) fields.push(`data: ${JSON.stringify(nd.data)}`);
-    if (nd.size && (nd.size[0] !== shape.w || nd.size[1] !== shape.h)) fields.push(`size: [${nd.size[0]}, ${nd.size[1]}]`);
+    // 显式尺寸一律写出（哪怕刚好等于图形默认值）：否则重载后会按文字重新自适应，
+    // 用户把节点缩到默认大小这种操作会"自己变回去"
+    if (nd.size) fields.push(`size: [${nd.size[0]}, ${nd.size[1]}]`);
     if (nd.pos) fields.push(`pos: [${Math.round(nd.pos[0])}, ${Math.round(nd.pos[1])}]`);
     out.push(`  - {${fields.join(', ')}}`);
   }
@@ -173,7 +175,7 @@ function timingLines(d: Diagram): string[] {
   const out: string[] = [];
   out.push('kind: timing');
   if (d.title) out.push(`title: ${q(d.title)}`);
-  if (d.tick && d.tick !== 10) out.push(`tick: ${d.tick}`);
+  if (d.tick !== undefined && d.tick > 0) out.push(`tick: ${d.tick}`);
 
   const multi = d.panels.length > 1 || !!d.panels[0]?.title;
   if (!multi) {

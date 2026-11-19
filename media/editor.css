@@ -252,6 +252,40 @@ button.tb-btn:disabled:hover {
 .fd-handle[data-handle="e"],
 .fd-handle[data-handle="w"] { cursor: ew-resize; }
 
+/* 边框命中带：透明但可点，用来拖整条边改尺寸（角上的手柄仍优先） */
+.fd-band {
+  fill: transparent;
+  stroke: none;
+  pointer-events: all;
+}
+
+/* 拖尺寸期间锁住光标，指针滑出图形也不会跳成默认箭头 */
+body.fd-resizing,
+body.fd-resizing * { cursor: inherit; }
+body.fd-resizing[data-resize-dir="n"],
+body.fd-resizing[data-resize-dir="s"] { cursor: ns-resize; }
+body.fd-resizing[data-resize-dir="e"],
+body.fd-resizing[data-resize-dir="w"] { cursor: ew-resize; }
+body.fd-resizing[data-resize-dir="nw"],
+body.fd-resizing[data-resize-dir="se"] { cursor: nwse-resize; }
+body.fd-resizing[data-resize-dir="ne"],
+body.fd-resizing[data-resize-dir="sw"] { cursor: nesw-resize; }
+
+/* 拖尺寸时的实时尺寸气泡 */
+#overlay > .resize-hint,
+.resize-hint {
+  position: absolute;
+  pointer-events: none;
+  font-size: 11.5px;
+  line-height: 1.35;
+  padding: 4px 7px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.74);
+  color: #fff;
+  white-space: nowrap;
+  z-index: 6;
+}
+
 .fd-anchor {
   cursor: crosshair;
 }

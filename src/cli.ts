@@ -15,10 +15,12 @@ interface Opts {
   padding?: number;
   scene?: number;
   json: boolean;
+  /** 严格模式：warning 也算失败（CI 里挡未知字段、端口写错这类问题） */
+  strict: boolean;
 }
 
 function parseArgs(args: string[]): { cmd: string; file?: string; opts: Opts } {
-  const opts: Opts = { theme: 'light', scale: 1, json: false };
+  const opts: Opts = { theme: 'light', scale: 1, json: false, strict: false };
   let cmd = '';
   let file: string | undefined;
   for (let i = 0; i < args.length; i++) {
@@ -29,6 +31,7 @@ function parseArgs(args: string[]): { cmd: string; file?: string; opts: Opts } {
     else if (a === '--padding') opts.padding = Number(args[++i]) || undefined;
     else if (a === '--scene') opts.scene = Math.max(0, (Number(args[++i]) || 1) - 1);
     else if (a === '--json') opts.json = true;
+    else if (a === '--strict') opts.strict = true;
     else if (a.startsWith('-')) continue;
     else if (!cmd) cmd = a;
     else if (!file) file = a;
@@ -94,13 +97,16 @@ function cmdValidate(file: string | undefined, o: Opts) {
   const { text } = readInput(file);
   const { file: doc, diagnostics } = parseFile(text);
   const errors = diagnostics.filter((d) => d.severity === 'error').length;
+  const warns = diagnostics.filter((d) => d.severity === 'warning').length;
+  const failed = errors + (o.strict ? warns : 0);
   const detailOf = (d: (typeof doc.scenes)[number]) =>
     d.kind === 'timing' ? timingSummary(d) : `${d.nodes.length} 节点 / ${d.edges.length} 连线`;
   if (o.json) {
     process.stdout.write(
       JSON.stringify(
         {
-          ok: errors === 0,
+          ok: failed === 0,
+          strict: o.strict,
           diagnostics,
           scenes: doc.scenes.map((s, i) => ({ index: i + 1, kind: s.kind, title: s.title, detail: detailOf(s) })),
           active: doc.active + 1,
@@ -113,10 +119,14 @@ function cmdValidate(file: string | undefined, o: Opts) {
     printDiagnostics(diagnostics);
     const lines = doc.scenes.map((s, i) => `  ${i === doc.active ? '*' : ' '} ${i + 1}. ${s.title || KIND_LABEL[s.kind]}（${KIND_LABEL[s.kind]}）：${detailOf(s)}`);
     const head = doc.scenes.length > 1 ? `${doc.scenes.length} 个视图` : detailOf(doc.scenes[doc.active]);
-    if (errors) process.stderr.write(`✖ 校验失败：${head}\n${lines.join('\n')}\n`);
-    else process.stdout.write(`✔ 校验通过：${head}\n${doc.scenes.length > 1 ? lines.join('\n') + '\n' : ''}`);
+    if (failed) {
+      const why = o.strict && warns ? `${errors} 个错误 / ${warns} 个警告（strict）` : `${errors} 个错误`;
+      process.stderr.write(`✖ 校验失败：${head} · ${why}\n${lines.join('\n')}\n`);
+    } else {
+      process.stdout.write(`✔ 校验通过：${head}${warns ? `（${warns} 条提示）` : ''}\n${doc.scenes.length > 1 ? lines.join('\n') + '\n' : ''}`);
+    }
   }
-  if (errors) process.exit(1);
+  if (failed) process.exit(1);
 }
 
 function cmdFmt(file: string | undefined, o: Opts) {
@@ -145,7 +155,7 @@ function help() {
       '',
       '用法：',
       '  fpga-diagram render <file.fpgad> [-o out.svg] [--theme dark|light] [--scale 2]',
-      '  fpga-diagram validate <file.fpgad> [--json]',
+      '  fpga-diagram validate <file.fpgad> [--json] [--strict]',
       '  fpga-diagram fmt <file.fpgad> [-o out.fpgad]',
       '  fpga-diagram new system_block|datapath|fsm|timing|multi [-o out.fpgad]',
       '  fpga-diagram mcp                 # 以 MCP server 方式启动（stdio）',

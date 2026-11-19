@@ -5,10 +5,10 @@ title: 图像缩放流水线
 
 nodes:
   - {id: vin,  type: module, label: 视频输入, sub: video_in, ports: "l:clk,rst_n | r:dout,de"}
-  - {id: csc,  type: module, label: 色彩空间转换, sub: RGB → YUV}
-  - {id: fifo, type: fifo,   label: 行缓存, sub: 2 × 2048}
-  - {id: scal, type: module, label: 双线性缩放, sub: 4×4 邻域}
-  - {id: vout, type: io,     label: 视频输出}
+  - {id: csc,  type: module, label: 色彩空间转换, sub: RGB → YUV, ports: "l:clk,rst_n,din | r:dout"}
+  - {id: fifo, type: fifo,   label: 行缓存, sub: 2 × 2048, ports: "l:din | r:dout"}
+  - {id: scal, type: module, label: 双线性缩放, sub: 4×4 邻域, ports: "l:din | r:dout"}
+  - {id: vout, type: io,     label: 视频输出, ports: "l:din"}
 
 edges:
   - vin.dout -> csc.din : 24bit bus

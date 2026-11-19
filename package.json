@@ -2,7 +2,7 @@
   "name": "fpga-diagram",
   "displayName": "FPGA Diagram",
   "description": "AI 友好的 FPGA 图表工具：系统框图 / 状态机 / 多组时序波形。一个文件多视图，文本即图形。",
-  "version": "2.0.1",
+  "version": "2.0.3",
   "publisher": "fpga-tools",
   "license": "MIT",
   "repository": {

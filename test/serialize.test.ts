@@ -86,3 +86,31 @@ active: 1
     assert.equal(back.scenes[1].kind, 'timing');
   });
 });
+
+describe('显式尺寸往返', () => {
+  it('把节点缩到图形默认大小，保存后仍然是固定尺寸', () => {
+    const { file } = parseFile(`kind: system_block
+nodes:
+  - {id: a, type: module, label: 一个很长的模块名字用于测试自适应宽度}
+`);
+    const nd = file.scenes[0].nodes[0];
+    // 模拟用户拖边框：缩到默认尺寸，宽高都写成显式值
+    nd.w = 130;
+    nd.h = 60;
+    nd.size = [130, 60];
+    const text = serializeFile(file);
+    assert.match(text, /size: \[130, 60\]/, '显式尺寸应写进文件');
+    const back = parseFile(text).file.scenes[0].nodes[0];
+    assert.deepEqual(back.size, [130, 60]);
+    assert.deepEqual([back.w, back.h], [130, 60]);
+  });
+
+  it('没有显式尺寸的节点不会凭空写出 size', () => {
+    const { file } = parseFile(`kind: system_block
+nodes:
+  - {id: a, type: module, label: A}
+`);
+    const text = serializeFile(file);
+    assert.ok(!/size:/.test(text), '未设尺寸时不应写 size');
+  });
+});
